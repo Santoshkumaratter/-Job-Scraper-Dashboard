@@ -1,0 +1,156 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard - Job Data Scraper{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1><i class="fas fa-chart-line"></i> Dashboard Overview</h1>
+    <p class="text-muted">Monitor your job scraping activities</p>
+</div>
+
+<!-- Statistics Cards -->
+<div class="row">
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <i class="fas fa-tags fa-2x text-primary mb-2"></i>
+            <h3>{{ total_keywords }}</h3>
+            <p>Active Keywords</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <i class="fas fa-globe fa-2x text-info mb-2"></i>
+            <h3>{{ total_portals }}</h3>
+            <p>Job Portals</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <i class="fas fa-filter fa-2x text-success mb-2"></i>
+            <h3>{{ total_filters }}</h3>
+            <p>Saved Filters</p>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card stat-card">
+            <i class="fas fa-briefcase fa-2x text-warning mb-2"></i>
+            <h3>{{ total_jobs }}</h3>
+            <p>Total Jobs Scraped</p>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Scraper Runs -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-history"></i> Recent Scraper Runs</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Filter</th>
+                        <th>Status</th>
+                        <th>Jobs Scraped</th>
+                        <th>Started At</th>
+                        <th>Duration (sec)</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for run in recent_runs %}
+                    <tr>
+                        <td>#{{ run.id }}</td>
+                        <td>{{ run.saved_filter.name }}</td>
+                        <td>
+                            {% if run.status == 'COMPLETED' %}
+                                <span class="badge bg-success">{{ run.status }}</span>
+                            {% elif run.status == 'RUNNING' %}
+                                <span class="badge bg-primary">{{ run.status }}</span>
+                            {% elif run.status == 'FAILED' %}
+                                <span class="badge bg-danger">{{ run.status }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ run.status }}</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ run.total_jobs_scraped }}</td>
+                        <td>{{ run.started_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ run.duration_seconds|default:"-" }}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-danger" onclick="deleteScraperRun({{ run.id }}, '#{{ run.id }}')">
+                                <i class="fas fa-trash"></i> Delete
+                            </button>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="7" class="text-center text-muted">No scraper runs yet</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Jobs -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-clock"></i> Recently Scraped Jobs</h5>
+    </div>
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Job Title</th>
+                        <th>Company</th>
+                        <th>Location</th>
+                        <th>Market</th>
+                        <th>Source</th>
+                        <th>Scraped At</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for job in recent_jobs %}
+                    <tr>
+                        <td><strong>{{ job.job_title }}</strong></td>
+                        <td>{{ job.company }}</td>
+                        <td>{{ job.location }}</td>
+                        <td><span class="badge bg-info">{{ job.market }}</span></td>
+                        <td>{{ job.source_job_portal.name|default:"-" }}</td>
+                        <td>{{ job.scraped_at|date:"Y-m-d H:i" }}</td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="6" class="text-center text-muted">No jobs scraped yet</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="text-center">
+            <a href="{% url 'jobs_page' %}" class="btn btn-primary">View All Jobs</a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function deleteScraperRun(runId, runName) {
+    if (confirm(`Are you sure you want to delete scraper run ${runName}?\n\nThis will:\n✓ Stop the process if running\n✓ Delete all associated data\n✓ This action cannot be undone`)) {
+        // Show loading state
+        const btn = event.target.closest('button');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Deleting...';
+        
+        // Navigate to delete URL
+        window.location.href = '/scraper-runs/' + runId + '/delete/';
+    }
+}
+</script>
+{% endblock %}
+
