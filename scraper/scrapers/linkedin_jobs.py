@@ -5,6 +5,10 @@ from typing import List, Dict, Optional
 from ..utils.base_scraper import BaseScraper
 import urllib.parse
 import json
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class LinkedInJobsScraper(BaseScraper):
@@ -51,29 +55,130 @@ class LinkedInJobsScraper(BaseScraper):
 
         for keyword in self.keywords:
             url = self.build_search_url(keyword)
+            logger.info(f"LinkedIn: Fetching jobs for keyword '{keyword}' from {url}")
             html = self.make_request(url, use_selenium=True)
             if not html:
+                logger.warning(f"LinkedIn: No HTML returned for keyword '{keyword}'")
                 continue
+            
+            # Check if we got a login page - be more specific to avoid false positives
+            html_lower = html.lower()
+            # Only treat as login page if we see specific login page indicators AND NO job-related content
+            has_login_indicators = ('sign in' in html_lower or 'join linkedin' in html_lower or 'welcome to linkedin' in html_lower)
+            has_job_content = ('base-card' in html_lower or 'jobs-search' in html_lower or '/jobs/view/' in html_lower or 'job-result' in html_lower)
+            
+            if has_login_indicators and not has_job_content:
+                logger.warning(f"LinkedIn: Got login/blocked page for keyword '{keyword}'. LinkedIn may require authentication.")
+                logger.info(f"LinkedIn: Still attempting to parse jobs in case there's some content...")
+                # Don't skip - try to find jobs anyway in case page has mixed content
+            elif has_job_content:
+                logger.info(f"LinkedIn: Found job content on page despite potential login indicators")
 
             soup = self.parse_html(html)
-            job_cards = soup.find_all('div', class_='base-card')
-
+            # LinkedIn uses multiple possible selectors for job cards
+            # Try each selector and combine results
+            job_cards = []
+            selectors = [
+                soup.find_all('div', class_='base-card'),
+                soup.find_all('div', class_='job-search-card'),
+                soup.find_all('li', class_='jobs-search-results__list-item'),
+                soup.find_all('div', {'data-job-id': True}),
+                soup.select('div[data-job-id]'),
+                soup.select('li.jobs-search-results__list-item'),
+                soup.find_all('div', class_='job-result-card'),
+                soup.find_all('div', class_='result-card'),
+            ]
+            
+            for cards in selectors:
+                if cards:
+                    job_cards.extend(cards)
+                    break  # Use first working selector
+            
+            # Remove duplicates while preserving order
+            seen_ids = set()
+            unique_cards = []
+            for card in job_cards:
+                card_id = card.get('data-job-id') or card.get('id') or str(card)
+                if card_id not in seen_ids:
+                    seen_ids.add(card_id)
+                    unique_cards.append(card)
+            job_cards = unique_cards
+            
+            if not job_cards:
+                # Try to find any job-related elements
+                logger.warning(f"LinkedIn: No job cards found with standard selectors for keyword '{keyword}'. Checking page content...")
+                
+                # Try alternative approach - look for links to job detail pages directly
+                job_links = soup.find_all('a', href=re.compile(r'/jobs/view/'))
+                if job_links:
+                    logger.info(f"LinkedIn: Found {len(job_links)} job links directly. Extracting jobs from links...")
+                    # Create virtual cards from links
+                    for link in job_links[:50]:  # Limit to first 50 to avoid too many
+                        try:
+                            href = link.get('href', '')
+                            if href:
+                                # Create a minimal card-like structure from the link
+                                parent = link.find_parent(['div', 'li', 'article'])
+                                if parent:
+                                    job_cards.append(parent)
+                        except:
+                            continue
+                
+                if not job_cards:
+                    # Log page structure for debugging
+                    all_divs = soup.find_all('div', limit=20)
+                    logger.debug(f"LinkedIn: Found {len(all_divs)} divs on page. First few classes: {[d.get('class') for d in all_divs[:5]]}")
+                    # Check for JSON-LD data
+                    json_scripts = soup.find_all('script', type='application/ld+json')
+                    if json_scripts:
+                        logger.info(f"LinkedIn: Found {len(json_scripts)} JSON-LD scripts. May contain job data.")
+            
             for card in job_cards:
                 try:
-                    title_elem = card.find('h3', class_='base-search-card__title')
+                    # Try multiple selectors for title
+                    title_elem = (
+                        card.find('h3', class_='base-search-card__title') or
+                        card.find('h3', class_='job-result-card__title') or
+                        card.find('h2', class_='job-result-card__title') or
+                        card.find('a', class_='job-result-card__title-link') or
+                        card.find('a', href=re.compile(r'/jobs/view/')) or
+                        card.select_one('h3, h2, a[href*="/jobs/view/"]')
+                    )
                     if not title_elem:
                         continue
                     job_title = self.clean_text(title_elem.get_text())
 
-                    link_elem = card.find('a', class_='base-card__full-link')
-                    job_link = link_elem.get('href', '') if link_elem else ''
+                    # Try multiple selectors for job link
+                    link_elem = (
+                        card.find('a', class_='base-card__full-link') or
+                        card.find('a', class_='job-result-card__title-link') or
+                        card.find('a', href=re.compile(r'/jobs/view/')) or
+                        title_elem.find('a') if title_elem else None
+                    )
+                    job_link = ''
+                    if link_elem and link_elem.has_attr('href'):
+                        job_link = link_elem.get('href', '')
                     if not job_link:
                         continue
+                    # Make sure it's a full URL
+                    if job_link.startswith('/'):
+                        job_link = urllib.parse.urljoin(self.base_url, job_link)
 
-                    company_elem = card.find('h4', class_='base-search-card__subtitle')
+                    # Try multiple selectors for company
+                    company_elem = (
+                        card.find('h4', class_='base-search-card__subtitle') or
+                        card.find('h4', class_='job-result-card__subtitle-link') or
+                        card.find('a', class_='job-result-card__subtitle-link') or
+                        card.select_one('h4, a[href*="/company/"]')
+                    )
                     company = self.clean_text(company_elem.get_text()) if company_elem else ''
 
-                    location_elem = card.find('span', class_='job-search-card__location')
+                    # Try multiple selectors for location
+                    location_elem = (
+                        card.find('span', class_='job-search-card__location') or
+                        card.find('span', class_='job-result-card__location') or
+                        card.select_one('span[class*="location"]')
+                    )
                     location = self.clean_text(location_elem.get_text()) if location_elem else ''
 
                     date_elem = card.find('time')
@@ -83,23 +188,37 @@ class LinkedInJobsScraper(BaseScraper):
                     if not self.matches_keyword(job_title, keyword):
                         continue
 
+                    # Initialize variables
                     company_url = None
+                    company_profile_url = None
+                    
+                    # Extract LinkedIn company profile URL from card (not website URL)
                     if company_elem:
                         company_link = company_elem.find('a')
                         if company_link and company_link.has_attr('href'):
-                            company_url = urllib.parse.urljoin(self.base_url, company_link['href'])
+                            href = company_link['href']
+                            # LinkedIn company profile URLs are like /company/perplexity or /company/...
+                            if '/company/' in href:
+                                company_profile_url = urllib.parse.urljoin(self.base_url, href)
 
                     detail = self._fetch_job_detail(job_link)
                     description = detail.get('description', '')
 
                     if detail.get('company'):
                         company = detail['company']
+                    # Use company profile URL from detail if available, otherwise from card
+                    if detail.get('company_profile_url'):
+                        company_profile_url = detail['company_profile_url']
                     if detail.get('company_url'):
-                        company_url = detail['company_url']
+                        company_url = detail['company_url']  # Website URL from profile
                     if detail.get('location'):
                         location = detail['location']
                     if detail.get('posted_date'):
                         posted_date = detail['posted_date']
+                    
+                    # Note: Company profile fetching moved to ScraperManager for better performance
+                    # This avoids fetching company profile for every job here (too slow)
+                    # ScraperManager will fetch company profile automatically if company_profile_url is set
 
                     detected_type = self.detect_job_type(job_title, location, description)
                     if detected_type == 'UNKNOWN':
@@ -115,8 +234,9 @@ class LinkedInJobsScraper(BaseScraper):
                     job_data = {
                         'job_title': job_title,
                         'company': company or detail.get('company', ''),
-                        'company_url': company_url,
-                        'company_size': 'UNKNOWN',
+                        'company_url': company_url,  # Will be enriched by ScraperManager from company profile
+                        'company_size': detail.get('company_size', 'UNKNOWN'),  # Will be enriched by ScraperManager from company profile
+                        'company_profile_url': company_profile_url,  # Pass to ScraperManager for enrichment
                         'market': self._infer_market(location),
                         'job_link': job_link,
                         'posted_date': posted_date,
@@ -130,10 +250,15 @@ class LinkedInJobsScraper(BaseScraper):
                         continue
 
                     jobs.append(job_data)
+                    logger.debug(f"LinkedIn: Added job '{job_title}' at {company}")
 
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"LinkedIn: Error parsing job card: {e}")
                     continue
+            
+            logger.info(f"LinkedIn: Found {len(jobs)} jobs for keyword '{keyword}'")
 
+        logger.info(f"LinkedIn: Total jobs found: {len(jobs)}")
         return jobs
 
     def _infer_market(self, location: str) -> str:
@@ -191,7 +316,30 @@ class LinkedInJobsScraper(BaseScraper):
                     detail['company'] = self.clean_text(name)
                 company_url = hiring.get('sameAs') or hiring.get('url')
                 if company_url:
-                    detail['company_url'] = company_url
+                    detail['company_url'] = company_url  # This might be website URL
+            
+            # Extract company profile URL from job detail page using BaseScraper method
+            company_profile_url = self._extract_company_profile_url(soup)
+            if company_profile_url:
+                detail['company_profile_url'] = company_profile_url
+            
+            # Try to get company size from hiringOrganization (fallback)
+            if isinstance(hiring, dict) and 'numberOfEmployees' in hiring:
+                employees = hiring.get('numberOfEmployees')
+                if isinstance(employees, (int, str)):
+                    detail['company_size'] = self._parse_company_size_from_count(employees)
+                elif isinstance(employees, dict):
+                    # Schema.org Range format
+                    min_val = employees.get('minValue')
+                    max_val = employees.get('maxValue')
+                    if min_val and max_val:
+                        detail['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+
+            # Extract company size from HTML if not in JSON-LD
+            if 'company_size' not in detail:
+                company_size = self._extract_company_size_from_html(soup)
+                if company_size:
+                    detail['company_size'] = company_size
 
             job_location = data.get('jobLocation')
             if isinstance(job_location, list):
@@ -217,6 +365,200 @@ class LinkedInJobsScraper(BaseScraper):
             break
 
         return detail
+
+    def _parse_company_size_from_count(self, count: any) -> str:
+        """Convert employee count to size category"""
+        try:
+            if isinstance(count, str):
+                # Remove commas and extract number
+                count = int(''.join(filter(str.isdigit, count)))
+            else:
+                count = int(count)
+            
+            if count >= 100000:
+                return 'ENTERPRISE'
+            elif count >= 10000:
+                return 'LARGE'
+            elif count >= 1000:
+                return 'MEDIUM'
+            elif count >= 50:
+                return 'SMALL'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
+    
+    def _parse_company_size_from_range(self, min_val: any, max_val: any) -> str:
+        """Convert employee range to size category"""
+        try:
+            if isinstance(min_val, str):
+                min_val = int(''.join(filter(str.isdigit, min_val)))
+            else:
+                min_val = int(min_val)
+            
+            # Use max for categorization if available, otherwise min
+            if isinstance(max_val, str):
+                max_val = int(''.join(filter(str.isdigit, max_val)))
+            else:
+                max_val = int(max_val)
+            
+            # Use average for better categorization
+            avg = (min_val + max_val) / 2
+            
+            if avg >= 100000:
+                return 'ENTERPRISE'
+            elif avg >= 10000:
+                return 'LARGE'
+            elif avg >= 1000:
+                return 'MEDIUM'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
+    
+    def _fetch_company_profile(self, profile_url: str) -> Dict[str, Optional[str]]:
+        """Fetch LinkedIn company profile to get real company website URL and size"""
+        profile_data = {}
+        if not profile_url:
+            return profile_data
+        
+        try:
+            html = self.make_request(profile_url, use_selenium=True)
+            if not html:
+                return profile_data
+            
+            soup = self.parse_html(html)
+            
+            # Extract company website URL from profile
+            # Look for website link in multiple locations
+            # LinkedIn shows website in "About us" section as external link
+            website_selectors = [
+                'a[data-control-name="topcard_website"]',
+                'a[href^="http"]:not([href*="linkedin.com"])',
+                '.org-top-card-summary-info-list__info-item a[href^="http"]',
+                'dd.org-top-card-summary-info-list__info-item a[href^="http"]',
+                'a[href*="website"]',
+            ]
+            
+            for selector in website_selectors:
+                website_link = soup.select_one(selector)
+                if website_link:
+                    href = website_link.get('href', '')
+                    # Clean LinkedIn tracking URLs
+                    if 'linkedin.com/redirect' in href or '/redirect' in href:
+                        # Extract actual URL from redirect
+                        from urllib.parse import parse_qs, urlparse
+                        parsed = urlparse(href)
+                        params = parse_qs(parsed.query)
+                        if 'url' in params:
+                            href = params['url'][0]
+                    if href and href.startswith('http') and 'linkedin.com' not in href:
+                        profile_data['website_url'] = href
+                        logger.info(f"Found website URL from LinkedIn profile: {href}")
+                        break
+            
+            # Extract company size from profile - multiple methods
+            # Method 1: Look in structured data (JSON-LD)
+            for script in soup.find_all('script', type='application/ld+json'):
+                try:
+                    data = json.loads(script.get_text(strip=True) or '{}')
+                    if isinstance(data, dict):
+                        # Look for Organization type
+                        if data.get('@type') == 'Organization':
+                            employees = data.get('numberOfEmployees')
+                            if employees:
+                                if isinstance(employees, (int, str)):
+                                    profile_data['company_size'] = self._parse_company_size_from_count(employees)
+                                    logger.info(f"Found company size from JSON-LD: {employees}")
+                                    break
+                                elif isinstance(employees, dict):
+                                    min_val = employees.get('minValue')
+                                    max_val = employees.get('maxValue')
+                                    if min_val and max_val:
+                                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                                        logger.info(f"Found company size from JSON-LD: {min_val}-{max_val}")
+                                        break
+                except:
+                    continue
+            
+            # Method 2: Extract from HTML text patterns
+            if 'company_size' not in profile_data:
+                all_text = soup.get_text()
+                size_patterns = [
+                    r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'view\s*all\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'(\d{1,3}(?:,\d{3})*)\s*employees?',
+                ]
+            
+            for pattern in size_patterns:
+                match = re.search(pattern, all_text, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 2:
+                        # Range format like "201-500 employees"
+                        min_val = int(match.group(1).replace(',', ''))
+                        max_val = int(match.group(2).replace(',', ''))
+                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                        break
+                    else:
+                        # Single count like "1,831 employees"
+                        count = int(match.group(1).replace(',', ''))
+                        profile_data['company_size'] = self._parse_company_size_from_count(count)
+                        break
+            
+            # Extract company name from profile
+            company_name_elem = soup.find('h1', class_='text-heading-xlarge')
+            if not company_name_elem:
+                company_name_elem = soup.find('h1')
+            if company_name_elem:
+                company_name = self.clean_text(company_name_elem.get_text())
+                if company_name:
+                    profile_data['company_name'] = company_name
+            
+        except Exception as e:
+            logger.debug(f"Error fetching company profile from {profile_url}: {e}")
+        
+        return profile_data
+
+    def _extract_company_size_from_html(self, soup) -> Optional[str]:
+        """Extract company size from LinkedIn HTML"""
+        try:
+            # LinkedIn shows company size in various formats
+            # Pattern 1: "11-50 employees" or "201-500 employees"
+            text = soup.get_text()
+            
+            # Look for employee count patterns
+            patterns = [
+                r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                r'(\d{1,3}(?:,\d{3})*)\+?\s*employees?',
+                r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 2:
+                        # Range format
+                        min_val = int(match.group(1).replace(',', ''))
+                        max_val = int(match.group(2).replace(',', ''))
+                        return self._parse_company_size_from_range(min_val, max_val)
+                    else:
+                        # Single count
+                        count = int(match.group(1).replace(',', ''))
+                        return self._parse_company_size_from_count(count)
+            
+            # Try to find in specific LinkedIn elements
+            size_elem = soup.find('span', class_=re.compile('company-size|employees', re.I))
+            if size_elem:
+                size_text = size_elem.get_text()
+                match = re.search(r'(\d{1,3}(?:,\d{3})*)', size_text)
+                if match:
+                    count = int(match.group(1).replace(',', ''))
+                    return self._parse_company_size_from_count(count)
+        except Exception as e:
+            logger.debug(f"Error extracting company size from HTML: {e}")
+        
+        return None
 
     def _map_employment_to_job_type(self, employment: Optional[str], workplace: Optional[str]) -> Optional[str]:
         employment_upper = (employment or '').upper()

@@ -296,9 +296,9 @@ function deleteAllJobs() {
                 }
             }
         }catch(e){ /* ignore */ }
-        setTimeout(poll, 1000);
+        setTimeout(poll, 500); // Poll every 500ms for faster updates
     }
-    setTimeout(poll, 1000);
+    setTimeout(poll, 500); // Start polling immediately
 })();
 </script>
 {% endblock %}

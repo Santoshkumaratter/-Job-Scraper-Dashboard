@@ -3,6 +3,7 @@ Base scraper class with common functionality for all job portal scrapers
 """
 import time
 import logging
+import re
 import requests
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup
@@ -39,8 +40,8 @@ class BaseScraper(ABC):
         self.job_type = job_type
         self.time_filter = time_filter
         self.location = location
-        self.timeout = 10  # Faster first-byte for initial fetch
-        self.rate_limit = 1  # 1 second between requests
+        self.timeout = 8  # Balanced timeout - fast but ensures all jobs are fetched
+        self.rate_limit = 0.5  # Reduced delay for faster scraping but prevents rate limiting
         self.jobs_data = []
         self.max_jobs_per_keyword = 50  # More results per keyword
         
@@ -181,7 +182,16 @@ class BaseScraper(ABC):
                     proxy = self._get_next_valid_proxy()
                     driver = self.get_driver(proxy)
                     driver.get(url)
-                    time.sleep(2)  # Wait for page load
+                    # Wait longer for JavaScript-heavy pages like LinkedIn
+                    time.sleep(5)  # Increased wait time for LinkedIn and similar sites
+                    # Scroll page to trigger lazy loading
+                    try:
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+                        time.sleep(2)
+                        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                        time.sleep(2)
+                    except:
+                        pass
                     html = driver.page_source
                     driver.quit()
                     return html
@@ -255,25 +265,33 @@ class BaseScraper(ABC):
         now = datetime.now()
         
         try:
-            # Handle "today", "yesterday"
-            if 'today' in date_str or 'just now' in date_str:
+            # Handle "today", "yesterday", "just posted", etc.
+            if any(x in date_str for x in ['today', 'just now', 'just posted', 'active today']):
                 return now.date()
             elif 'yesterday' in date_str:
                 return (now - timedelta(days=1)).date()
             
-            # Handle "X hours/days/weeks ago"
+            # Handle "X hours/days/weeks/months ago"
             if 'hour' in date_str:
-                hours = int(''.join(filter(str.isdigit, date_str)))
-                return (now - timedelta(hours=hours)).date()
+                match = re.search(r'(\d+)', date_str)
+                if match:
+                    hours = int(match.group(1))
+                    return (now - timedelta(hours=hours)).date()
             elif 'day' in date_str:
-                days = int(''.join(filter(str.isdigit, date_str)))
-                return (now - timedelta(days=days)).date()
+                match = re.search(r'(\d+)', date_str)
+                if match:
+                    days = int(match.group(1))
+                    return (now - timedelta(days=days)).date()
             elif 'week' in date_str:
-                weeks = int(''.join(filter(str.isdigit, date_str)))
-                return (now - timedelta(weeks=weeks)).date()
+                match = re.search(r'(\d+)', date_str)
+                if match:
+                    weeks = int(match.group(1))
+                    return (now - timedelta(weeks=weeks)).date()
             elif 'month' in date_str:
-                months = int(''.join(filter(str.isdigit, date_str)))
-                return (now - timedelta(days=months*30)).date()
+                match = re.search(r'(\d+)', date_str)
+                if match:
+                    months = int(match.group(1))
+                    return (now - timedelta(days=months*30)).date()
             
             # Try parsing standard date formats
             for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y', '%B %d, %Y']:
@@ -436,7 +454,7 @@ class BaseScraper(ABC):
     
     def rate_limit_delay(self):
         """Apply rate limiting delay - MINIMAL for speed"""
-        time.sleep(0.1)  # Minimal delay for API-based scrapers
+        time.sleep(self.rate_limit)  # Use configured rate limit
 
     # ===== Utility: Rotation helpers =====
     def _fetch_via_scraperapi(self, url: str, render: bool = False) -> Optional[str]:
@@ -532,4 +550,200 @@ class BaseScraper(ABC):
             self.rate_limit_delay()
         
         return all_jobs
+
+    def _extract_company_profile_url(self, soup: BeautifulSoup) -> Optional[str]:
+        """
+        Generic method to extract company profile URL from job detail page
+        Checks common patterns used by different portals
+        """
+        import urllib.parse
+        
+        # Common patterns for company profile URLs across different portals
+        patterns = [
+            r'/company/[^/]+',  # LinkedIn, Dice, etc.
+            r'/employer/[^/]+',  # Dice, CV-Library
+            r'/employers/[^/]+',  # CV-Library
+            r'/cmp/[^/]+',  # Indeed
+            r'/company/[^/?]+',  # General company URLs
+            r'/employer/[^/?]+',  # General employer URLs
+        ]
+        
+        # Look for company profile links in HTML
+        for pattern in patterns:
+            company_link = soup.find('a', href=re.compile(pattern, re.I))
+            if company_link:
+                href = company_link.get('href', '')
+                if href:
+                    if href.startswith('/'):
+                        return urllib.parse.urljoin(self.base_url, href)
+                    elif self.base_url.split('//')[1].split('/')[0] in href:  # Same domain
+                        return href
+                    elif href.startswith('http'):
+                        return href
+        
+        # Also check for company name links (many portals use company name as clickable link)
+        company_name_links = soup.find_all('a', href=True)
+        for link in company_name_links:
+            href = link.get('href', '')
+            if any(pattern.replace('[^/]+', '').replace('[^/?]+', '') in href for pattern in patterns):
+                if href.startswith('/'):
+                    return urllib.parse.urljoin(self.base_url, href)
+                elif href.startswith('http'):
+                    return href
+        
+        return None
+
+    def _fetch_company_profile(self, profile_url: str) -> Dict[str, Optional[str]]:
+        """
+        Generic method to fetch company profile page and extract real company website URL and size
+        Works for most job portals that have company profile pages
+        """
+        profile_data = {}
+        if not profile_url:
+            return profile_data
+        
+        try:
+            html = self.make_request(profile_url, use_selenium=True)
+            if not html:
+                return profile_data
+            
+            soup = self.parse_html(html)
+            domain = self.base_url.split('//')[1].split('/')[0] if '//' in self.base_url else ''
+            
+            # Extract company website URL from company profile
+            website_selectors = [
+                'a[href^="http"]:not([href*="' + domain + '"])',
+                '.company-website a',
+                'a.company-link[href^="http"]',
+                'a[data-control-name="topcard_website"]',
+                '.org-top-card-summary-info-list__info-item a[href^="http"]',
+                'dd.org-top-card-summary-info-list__info-item a[href^="http"]',
+                'a[href*="website"]',
+            ]
+            
+            for selector in website_selectors:
+                try:
+                    website_link = soup.select_one(selector)
+                    if website_link:
+                        href = website_link.get('href', '')
+                        # Clean redirect URLs
+                        if 'redirect' in href.lower() or '/redirect' in href:
+                            from urllib.parse import parse_qs, urlparse
+                            parsed = urlparse(href)
+                            params = parse_qs(parsed.query)
+                            if 'url' in params:
+                                href = params['url'][0]
+                        if href and href.startswith('http') and domain not in href.lower():
+                            profile_data['website_url'] = href
+                            logger.info(f"Found website URL from {self.portal_name} company profile: {href}")
+                            break
+                except:
+                    continue
+            
+            # Extract company size from company profile - Method 1: JSON-LD
+            for script in soup.find_all('script', type='application/ld+json'):
+                try:
+                    import json
+                    data = json.loads(script.get_text(strip=True) or '{}')
+                    if isinstance(data, dict):
+                        if data.get('@type') == 'Organization':
+                            employees = data.get('numberOfEmployees')
+                            if employees:
+                                if isinstance(employees, (int, str)):
+                                    profile_data['company_size'] = self._parse_company_size_from_count(employees)
+                                    logger.info(f"Found company size from {self.portal_name} JSON-LD: {employees}")
+                                    break
+                                elif isinstance(employees, dict):
+                                    min_val = employees.get('minValue')
+                                    max_val = employees.get('maxValue')
+                                    if min_val and max_val:
+                                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                                        logger.info(f"Found company size from {self.portal_name} JSON-LD: {min_val}-{max_val}")
+                                        break
+                except:
+                    continue
+            
+            # Method 2: Extract from HTML text patterns
+            if 'company_size' not in profile_data:
+                all_text = soup.get_text()
+                size_patterns = [
+                    r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'view\s*all\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    r'(\d{1,3}(?:,\d{3})*)\s*employees?',
+                ]
+                
+                for pattern in size_patterns:
+                    match = re.search(pattern, all_text, re.IGNORECASE)
+                    if match:
+                        if len(match.groups()) == 2:
+                            min_val = int(match.group(1).replace(',', ''))
+                            max_val = int(match.group(2).replace(',', ''))
+                            profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                            logger.info(f"Found company size from {self.portal_name} profile: {min_val}-{max_val}")
+                            break
+                        else:
+                            count = int(match.group(1).replace(',', ''))
+                            profile_data['company_size'] = self._parse_company_size_from_count(count)
+                            logger.info(f"Found company size from {self.portal_name} profile: {count}")
+                            break
+            
+            # Extract company name from profile
+            company_name_elem = soup.find('h1') or soup.find('h2', class_=re.compile('company', re.I))
+            if company_name_elem:
+                company_name = self.clean_text(company_name_elem.get_text())
+                if company_name:
+                    profile_data['company_name'] = company_name
+            
+        except Exception as e:
+            logger.debug(f"Error fetching {self.portal_name} company profile from {profile_url}: {e}")
+        
+        return profile_data
+
+    def _parse_company_size_from_count(self, count: any) -> str:
+        """Convert employee count to size category"""
+        try:
+            if isinstance(count, str):
+                count = int(''.join(filter(str.isdigit, count)))
+            else:
+                count = int(count)
+            
+            if count >= 100000:
+                return 'ENTERPRISE'
+            elif count >= 10000:
+                return 'LARGE'
+            elif count >= 1000:
+                return 'MEDIUM'
+            elif count >= 50:
+                return 'SMALL'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
+    
+    def _parse_company_size_from_range(self, min_val: any, max_val: any) -> str:
+        """Convert employee range to size category"""
+        try:
+            if isinstance(min_val, str):
+                min_val = int(''.join(filter(str.isdigit, min_val)))
+            else:
+                min_val = int(min_val)
+            
+            if isinstance(max_val, str):
+                max_val = int(''.join(filter(str.isdigit, max_val)))
+            else:
+                max_val = int(max_val)
+            
+            avg = (min_val + max_val) / 2
+            
+            if avg >= 100000:
+                return 'ENTERPRISE'
+            elif avg >= 10000:
+                return 'LARGE'
+            elif avg >= 1000:
+                return 'MEDIUM'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
 

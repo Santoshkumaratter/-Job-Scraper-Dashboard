@@ -83,8 +83,8 @@ class ScraperManager:
             failed_portals = 0
             saved_count = 0
 
-            # Scrape portals in parallel for speed
-            max_workers = min(6, len(job_portals)) or 1
+            # Scrape portals in parallel for speed - increased workers for faster scraping
+            max_workers = min(15, len(job_portals)) or 1
             executor = ThreadPoolExecutor(max_workers=max_workers)
             future_to_portal = {}
             try:
@@ -297,21 +297,61 @@ class ScraperManager:
                     logger.debug("Skipping job due to unreliable company name")
                     continue
 
-                # Enrich company size with real data
+                # Try to fetch company profile for real company URL and size (if available)
+                company_profile_url = job_data.get('company_profile_url')
+                profile_data = {}
+                if company_profile_url:
+                    try:
+                        # Get scraper instance using portal_id
+                        if portal:
+                            scraper_class = get_scraper(portal.name)
+                            if scraper_class:
+                                # Create temporary scraper instance to fetch company profile
+                                temp_scraper = scraper_class(
+                                    keywords=['temp'],
+                                    job_type='ALL',
+                                    time_filter='ALL',
+                                    location='ALL'
+                                )
+                                profile_data = temp_scraper._fetch_company_profile(company_profile_url)
+                                if profile_data:
+                                    # Update company URL and size from profile
+                                    if profile_data.get('website_url'):
+                                        job_data['company_url'] = profile_data['website_url']
+                                    if profile_data.get('company_size'):
+                                        job_data['company_size'] = profile_data['company_size']
+                                    if profile_data.get('company_name'):
+                                        company_name = profile_data['company_name']
+                    except Exception as e:
+                        logger.debug(f"Company profile fetch failed for {company_name}: {e}")
+                
+                # Enrich company size with real data (fast, non-blocking)
                 company_size = job_data.get('company_size', 'UNKNOWN')
                 if company_size == 'UNKNOWN':
-                    company_size = self.company_enrichment.get_company_size(
-                        company_name,
-                        job_data.get('company_url')
-                    )
+                    # Quick check - skip if taking too long
+                    try:
+                        company_size = self.company_enrichment.get_company_size(
+                            company_name,
+                            job_data.get('company_url')
+                        )
+                    except Exception as e:
+                        logger.debug(f"Company size enrichment failed for {company_name}: {e}")
+                        company_size = 'UNKNOWN'
                 
-                # Create job
+                # Create job - ensure company URL is always populated and validated
                 raw_company_url = job_data.get('company_url')
-                if not raw_company_url:
-                    domain = self.company_enrichment.get_company_domain(company_name)
-                    if domain:
-                        raw_company_url = f'https://{domain}'
                 company_url = self._sanitize_company_url(raw_company_url, company_name)
+                
+                # If URL is missing or invalid, try enrichment (fast, non-blocking)
+                if not company_url:
+                    try:
+                        domain = self.company_enrichment.get_company_domain(company_name)
+                        if domain:
+                            enriched_url = f'https://{domain}'
+                            company_url = self._sanitize_company_url(enriched_url, company_name)
+                    except Exception as e:
+                        logger.debug(f"Company URL enrichment failed for {company_name}: {e}")
+                        company_url = None
                 job_type_value = (job_data.get('job_type') or 'UNKNOWN').upper()
                 if job_type_value not in {'REMOTE', 'FULL_TIME', 'FREELANCE', 'HYBRID', 'PART_TIME', 'UNKNOWN'}:
                     job_type_value = 'UNKNOWN'
@@ -439,37 +479,110 @@ class ScraperManager:
             logger.error(f"Error finding decision makers for {job.company}: {str(e)}")
 
     def _sanitize_company_url(self, url: Optional[str], company_name: str) -> Optional[str]:
+        """Validate company URL - ensure it's a real company website, not a job portal or generic domain"""
         if not url:
             return None
         try:
             parsed = urlparse(url)
             if parsed.scheme not in {'http', 'https'}:
                 return None
+            
             host = (parsed.hostname or '').lower()
             if not host:
                 return None
+            
+            # Remove 'www.' for comparison
+            host_clean = host.replace('www.', '')
+            
+            # Block job portals
             blocked_hosts = {
                 'linkedin.com', 'indeed.com', 'indeed.co.uk', 'cv-library.co.uk', 'cvlibrary.co.uk',
                 'remoteok.com', 'remotive.com', 'weworkremotely.com', 'dice.com', 'ziprecruiter.com',
                 'jobsite.co.uk', 'reed.co.uk', 'jooble.org', 'jooble.com', 'glassdoor.com', 'glassdoor.co.in',
-                'monster.co.uk', 'monster.com', 'totaljobs.com', 'simplyhired.com'
+                'monster.co.uk', 'monster.com', 'totaljobs.com', 'simplyhired.com', 'stackoverflow.com',
+                'workable.com', 'greenhouse.io', 'lever.co', 'jobs.lever.co', 'bamboohr.com'
             }
-            if host in blocked_hosts or any(host.endswith(f".{blocked}") for blocked in blocked_hosts):
+            if host_clean in blocked_hosts or any(host_clean.endswith(f".{blocked}") for blocked in blocked_hosts):
                 return None
-
-            # Basic check: ensure company token appears in host (after stripping non-alphanumerics)
-            words = [re.sub(r'[^a-z0-9]', '', part) for part in company_name.lower().split() if part]
-            host_token = re.sub(r'[^a-z0-9]', '', host)
-            meaningful_words = [w for w in words if len(w) >= 3]
-            initials = ''.join(w[0] for w in words if w)
-            if meaningful_words:
-                if not any(word in host_token for word in meaningful_words):
-                    if not (initials and initials in host_token):
-                        return None
+            
+            # Block social media and generic platforms
+            blocked_platforms = {
+                'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'youtube.com',
+                'github.com', 'gitlab.com', 'medium.com', 'wikipedia.org', 'reddit.com',
+                'google.com', 'bing.com', 'yahoo.com', 'microsoft.com'
+            }
+            # Only block if it's exactly these domains (not subdomains like api.company.com)
+            if host_clean in blocked_platforms:
+                return None
+            
+            # Verify domain matches company name (for enriched domains)
+            # Extract meaningful words from company name
+            company_words = [re.sub(r'[^a-z0-9]', '', w) for w in company_name.lower().split() if len(w) >= 3]
+            company_token = re.sub(r'[^a-z0-9]', '', company_name.lower())
+            host_token = re.sub(r'[^a-z0-9]', '', host_clean.split('.')[0])  # Main domain part
+            
+            # STRICT: For enriched domains, verify it matches company name
+            # Reject if domain doesn't match company name at all
+            if company_words:
+                matches_name = False
+                
+                # For single word company names, require exact or very close match
+                if len(company_words) == 1:
+                    company_word = company_words[0].lower()
+                    # Exact match required for single word companies
+                    if company_word == host_token.lower() or company_word in host_token.lower():
+                        matches_name = True
+                    elif len(host_token) <= 3:
+                        # Very short domains need content verification
+                        matches_name = self._verify_domain_in_url(host, company_name, company_words)
+                else:
+                    # Multi-word: check if any word matches
+                    for word in company_words:
+                        if len(word) >= 4:
+                            if word.lower() in host_token.lower() or host_token.lower() in word.lower():
+                                matches_name = True
+                                break
+                    
+                    # Check acronym for multi-word
+                    if not matches_name and len(company_words) > 1:
+                        acronym = ''.join(w[0] for w in company_words if w)
+                        if len(acronym) >= 2 and acronym.lower() == host_token.lower():
+                            matches_name = True
+                
+                # REJECT if domain doesn't match at all (prevent wrong domains like atom.com for Squad)
+                if not matches_name:
+                    logger.debug(f"Rejected domain {host} - doesn't match company {company_name}")
+                    return None
 
             return parsed.geturl()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Error validating company URL {url}: {e}")
             return None
+    
+    def _verify_domain_in_url(self, domain: str, company_name: str, company_words: list) -> bool:
+        """Verify domain by checking website content for company name"""
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            
+            resp = requests.get(f'https://{domain}', timeout=3, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, 'lxml')
+                title = soup.find('title')
+                title_text = title.get_text().lower() if title else ''
+                
+                # Require company name in title for short domains
+                company_lower = company_name.lower()
+                company_main_word = company_words[0].lower() if company_words else ''
+                
+                if company_lower in title_text or company_main_word in title_text:
+                    return True
+                
+                return False
+        except:
+            return False
 
     # ======= Sanitizers =======
     def _sanitize(self, value: str) -> str:

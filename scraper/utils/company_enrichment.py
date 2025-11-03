@@ -4,6 +4,7 @@ Fetches real company information including size, domain, etc.
 """
 import requests
 import logging
+import re
 from typing import Dict, Optional
 from django.conf import settings
 from bs4 import BeautifulSoup
@@ -19,119 +20,52 @@ class CompanyEnrichment:
         self._company_cache: Dict[str, Dict] = {}
         self.clearbit_key: str = getattr(settings, 'CLEARBIT_API_KEY', '') or ''
     
-    # Known company sizes database (can be expanded)
-    KNOWN_COMPANIES = {
-        'google': {'size': 'ENTERPRISE', 'employees': '100000+'},
-        'microsoft': {'size': 'ENTERPRISE', 'employees': '100000+'},
-        'amazon': {'size': 'ENTERPRISE', 'employees': '100000+'},
-        'meta': {'size': 'ENTERPRISE', 'employees': '50000+'},
-        'apple': {'size': 'ENTERPRISE', 'employees': '100000+'},
-        'netflix': {'size': 'LARGE', 'employees': '10000+'},
-        'airbnb': {'size': 'LARGE', 'employees': '5000+'},
-        'uber': {'size': 'LARGE', 'employees': '20000+'},
-        'shopify': {'size': 'LARGE', 'employees': '10000+'},
-        'stripe': {'size': 'LARGE', 'employees': '5000+'},
-        'slack': {'size': 'LARGE', 'employees': '2000+'},
-        'twitter': {'size': 'LARGE', 'employees': '5000+'},
-        'linkedin': {'size': 'ENTERPRISE', 'employees': '20000+'},
-        'salesforce': {'size': 'ENTERPRISE', 'employees': '70000+'},
-        'adobe': {'size': 'ENTERPRISE', 'employees': '25000+'},
-        'oracle': {'size': 'ENTERPRISE', 'employees': '130000+'},
-        'ibm': {'size': 'ENTERPRISE', 'employees': '280000+'},
-        'intel': {'size': 'ENTERPRISE', 'employees': '120000+'},
-        'cisco': {'size': 'ENTERPRISE', 'employees': '80000+'},
-        'spotify': {'size': 'LARGE', 'employees': '6000+'},
-        'github': {'size': 'MEDIUM', 'employees': '2000+'},
-        'gitlab': {'size': 'MEDIUM', 'employees': '1500+'},
-        'dropbox': {'size': 'LARGE', 'employees': '3000+'},
-        'zoom': {'size': 'LARGE', 'employees': '7000+'},
-        'atlassian': {'size': 'LARGE', 'employees': '10000+'},
-        'asana': {'size': 'MEDIUM', 'employees': '1000+'},
-        'notion': {'size': 'MEDIUM', 'employees': '500+'},
-        'figma': {'size': 'MEDIUM', 'employees': '800+'},
-        'canva': {'size': 'LARGE', 'employees': '3000+'},
-        'webflow': {'size': 'MEDIUM', 'employees': '800+'},
-        'vercel': {'size': 'MEDIUM', 'employees': '300+'},
-        'netlify': {'size': 'SMALL', 'employees': '200+'},
-    }
-    
     def get_company_size(self, company_name: str, company_url: Optional[str] = None) -> str:
         """
-        Determine company size using multiple methods
+        Determine company size using REAL data sources only (no hardcoded values)
         
-        Args:
-            company_name: Name of the company
-            company_url: Company website URL
-            
+        Methods used (in order):
+        1. Scrape from company website (real employee count from website)
+        2. Clearbit API (if API key available - real employee metrics)
+        
         Returns:
-            Company size (SMALL, MEDIUM, LARGE, ENTERPRISE)
+            Company size (SMALL, MEDIUM, LARGE, ENTERPRISE) or UNKNOWN if no real data found
         """
         if not company_name:
             return 'UNKNOWN'
         
-        company_lower = company_name.lower().strip()
-        
-        # Method 1: Check known companies database
-        for known_company, data in self.KNOWN_COMPANIES.items():
-            if known_company in company_lower:
-                logger.info(f"Found {company_name} in database: {data['size']}")
-                return data['size']
-        
-        # Method 2: Heuristic based on company name patterns
-        size = self._estimate_from_name(company_name)
-        if size != 'UNKNOWN':
-            return size
-        
-        # Method 3: Try to scrape from company website (including guessed domain)
+        # Method 1: Try to scrape from company website (REAL DATA)
         effective_url = company_url
         if not effective_url:
             domain = self.get_company_domain(company_name)
             if domain:
                 effective_url = f'https://{domain}'
+        
         if effective_url:
             size = self._scrape_from_website(effective_url)
             if size != 'UNKNOWN':
+                logger.info(f"Found company size for {company_name} via website scraping: {size}")
                 return size
 
-        # Method 4: Use Clearbit metrics if API key available
+        # Method 2: Use Clearbit metrics if API key available (REAL DATA)
         domain_for_size = self._extract_domain(effective_url) if effective_url else None
         if not domain_for_size:
             domain_for_size = self.get_company_domain(company_name)
+        
         if domain_for_size:
             size = self._size_from_clearbit(domain_for_size)
             if size:
+                logger.info(f"Found company size for {company_name} via Clearbit: {size}")
                 return size
 
-        # Method 5: No reliable size found
-        logger.debug(f"Unable to determine company size for {company_name}; returning UNKNOWN")
-        return 'UNKNOWN'
-    
-    def _estimate_from_name(self, company_name: str) -> str:
-        """Estimate company size from name patterns"""
-        company_lower = company_name.lower()
-        
-        # Enterprise indicators - Very strong signals
-        if any(x in company_lower for x in ['international', 'global', 'worldwide', 'plc', 'holdings', 'bank', 'insurance']):
-            return 'ENTERPRISE'
-        
-        # Large company indicators - Strong corporate signals
-        if any(x in company_lower for x in ['corporation', 'group ltd', 'technologies', 'systems', 'solutions inc']):
-            return 'LARGE'
-        
-        # Startup/Small indicators - Clear small company signals
-        if any(x in company_lower for x in ['startup', 'studio', 'labs', 'works', 'ventures']):
-            return 'SMALL'
-        
-        # Medium indicators - Common corporate suffixes
-        if any(x in company_lower for x in ['limited', 'ltd', 'inc', 'llc', 'corp']) and not any(x in company_lower for x in ['group', 'international']):
-            return 'MEDIUM'
-        
+        # No real data found - return UNKNOWN
+        logger.debug(f"No real company size data found for {company_name}; returning UNKNOWN")
         return 'UNKNOWN'
     
     def _scrape_from_website(self, company_url: str) -> str:
         """Try to scrape company size from website"""
         try:
-            response = requests.get(company_url, timeout=5, headers={
+            response = requests.get(company_url, timeout=3, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             
@@ -139,18 +73,58 @@ class CompanyEnrichment:
                 soup = BeautifulSoup(response.text, 'lxml')
                 text = soup.get_text().lower()
                 
-                # Look for employee count mentions
-                if any(x in text for x in ['100,000+ employees', '100000+ employees', '100k+ employees']):
+                # Look for employee count mentions - multiple patterns
+                # Enterprise (>100k)
+                enterprise_patterns = [
+                    '100,000+', '100000+', '100k+', '100,000', '100000',
+                    'over 100,000', 'more than 100,000', '500000+', '1 million+',
+                ]
+                if any(p in text for p in enterprise_patterns):
                     return 'ENTERPRISE'
-                elif any(x in text for x in ['10,000+ employees', '10000+ employees', '10k+ employees']):
+                
+                # Large (10k-100k)
+                large_patterns = [
+                    '10,000+', '10000+', '10k+', '50,000+', '50000+',
+                    '10,000-', '10000-', 'between 10,000', 'over 10,000',
+                ]
+                if any(p in text for p in large_patterns):
                     return 'LARGE'
-                elif any(x in text for x in ['1,000+ employees', '1000+ employees', '1k+ employees']):
+                
+                # Medium (1k-10k)
+                medium_patterns = [
+                    '1,000+', '1000+', '1k+', '5,000+', '5000+',
+                    '1,000-', '1000-', 'between 1,000', 'over 1,000',
+                ]
+                if any(p in text for p in medium_patterns):
                     return 'MEDIUM'
-                elif any(x in text for x in ['100+ employees', '50+ employees']):
+                
+                # Small (<1k) - check for specific ranges
+                small_patterns = [
+                    '100+ employees', '50+ employees', '200+ employees',
+                    'under 500', 'less than 500', 'between 50-500',
+                ]
+                if any(p in text for p in small_patterns):
                     return 'SMALL'
+                
+                # Try to extract exact numbers using regex
+                employee_count_pattern = re.search(r'(\d{1,3}(?:,\d{3})*)\s*(?:employees?|people|staff)', text)
+                if employee_count_pattern:
+                    count_str = employee_count_pattern.group(1).replace(',', '')
+                    try:
+                        count = int(count_str)
+                        if count >= 100000:
+                            return 'ENTERPRISE'
+                        elif count >= 10000:
+                            return 'LARGE'
+                        elif count >= 1000:
+                            return 'MEDIUM'
+                        elif count >= 50:
+                            return 'SMALL'
+                    except ValueError:
+                        pass
         
         except Exception as e:
-            logger.debug(f"Could not scrape company size: {str(e)}")
+            logger.debug(f"Could not scrape company size from {company_url}: {str(e)}")
         
         return 'UNKNOWN'
 
@@ -177,7 +151,7 @@ class CompanyEnrichment:
             resp = requests.get(
                 'https://autocomplete.clearbit.com/v1/companies/suggest',
                 params={'query': company_name},
-                timeout=4,
+                timeout=2,  # Faster timeout
             )
             resp.raise_for_status()
             suggestions = resp.json()
@@ -191,32 +165,51 @@ class CompanyEnrichment:
         return None
 
     def _fetch_domain_via_search(self, company_name: str) -> Optional[str]:
-        try:
-            query = company_name.strip()
-            if not query:
-                return None
-            payload = {
-                'q': f"{query} company website",
-                'kl': 'us-en',
-            }
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            }
-            with requests.Session() as session:
-                session.get('https://duckduckgo.com', timeout=5, headers=headers)
-                resp = session.post('https://duckduckgo.com/html/', data=payload, headers=headers, timeout=6)
+        """Try multiple search strategies to find company domain"""
+        if not company_name or not company_name.strip():
+            return None
+        
+        # Try different search queries
+        search_queries = [
+            f"{company_name} official website",
+            f"{company_name} company",
+            f'"{company_name}" website',
+        ]
+        
+        for query in search_queries:
+            try:
+                # Try Bing search (simpler than DDG)
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                }
+                # Use Bing's HTML search (no API key needed)
+                bing_url = 'https://www.bing.com/search'
+                params = {'q': query, 'count': 5}
+                resp = requests.get(bing_url, params=params, headers=headers, timeout=3)
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, 'lxml')
-                for link in soup.select('a.result__url'):
-                    domain = link.get_text(strip=True)
-                    domain = self._extract_domain(domain)
+                
+                # Extract domains from search results
+                for link in soup.select('ol#b_results li h2 a, div[class*="title"] a'):
+                    href = link.get('href', '')
+                    domain = self._extract_domain(href)
                     if domain and self._is_domain_candidate(domain):
-                        return domain
-        except Exception as e:
-            logger.debug(f"DuckDuckGo domain lookup failed for {company_name}: {e}")
-        # last resort: guess
+                        # Verify domain actually belongs to company
+                        if self._verify_company_domain(domain, company_name):
+                            logger.info(f"Found verified domain via Bing for {company_name}: {domain}")
+                            return domain
+                        else:
+                            logger.debug(f"Domain {domain} found but doesn't match {company_name}, skipping")
+            except Exception as e:
+                logger.debug(f"Bing search failed for '{query}': {e}")
+                continue
+        
+        # Last resort: try domain guessing
+        logger.debug(f"Trying domain guess for {company_name}")
         guess = self._guess_domain(company_name)
+        if guess:
+            logger.info(f"Guessed domain for {company_name}: {guess}")
         return guess
 
     def _is_domain_candidate(self, domain: str) -> bool:
@@ -232,19 +225,143 @@ class CompanyEnrichment:
             return False
         return True
 
+    def _verify_company_domain(self, domain: str, company_name: str) -> bool:
+        """Verify that a domain actually belongs to the company"""
+        if not domain or not company_name:
+            return False
+        
+        # Extract meaningful words from company name
+        company_words = [re.sub(r'[^a-z0-9]', '', w) for w in company_name.lower().split() if len(w) >= 3]
+        if not company_words:
+            return False
+        
+        # Get main domain part (without TLD)
+        domain_part = domain.split('.')[0].lower()
+        domain_token = re.sub(r'[^a-z0-9]', '', domain_part)
+        
+        # STRICT: Check if domain contains company name words (exact or partial match)
+        matches = False
+        
+        # For single word company names, require exact or very close match
+        if len(company_words) == 1:
+            company_word = company_words[0].lower()
+            domain_lower = domain_token.lower()
+            # Exact match or domain contains company word
+            if company_word == domain_lower or company_word in domain_lower:
+                matches = True
+            # Also check if company word starts domain or vice versa
+            elif domain_lower.startswith(company_word[:3]) or company_word.startswith(domain_lower[:3]):
+                # Verify by checking website content for company name
+                matches = self._verify_domain_by_content(domain, company_name, company_words)
+        
+        # For multi-word company names
+        elif len(company_words) > 1:
+            # Check if any meaningful word matches
+            for word in company_words:
+                if len(word) >= 4 and (word in domain_token or domain_token in word):
+                    matches = True
+                    break
+            
+            # Check acronym
+            if not matches:
+                acronym = ''.join(w[0] for w in company_words if w)
+                if len(acronym) >= 2 and acronym.lower() == domain_token.lower():
+                    matches = True
+            
+            # If still no match, verify by content
+            if not matches:
+                matches = self._verify_domain_by_content(domain, company_name, company_words)
+        
+        return matches
+    
+    def _verify_domain_by_content(self, domain: str, company_name: str, company_words: list) -> bool:
+        """Verify domain by checking if company name appears in website content"""
+        try:
+            resp = requests.get(f'https://{domain}', timeout=3, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            if resp.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, 'lxml')
+                
+                # Check page title
+                title = soup.find('title')
+                title_text = title.get_text().lower() if title else ''
+                
+                # Check page content (first 5000 chars to avoid false matches)
+                body = soup.find('body')
+                body_text = body.get_text().lower()[:5000] if body else ''
+                
+                # Check meta description
+                meta_desc = soup.find('meta', {'name': 'description'})
+                meta_text = meta_desc.get('content', '').lower() if meta_desc else ''
+                
+                # Combine text for checking
+                all_text = f"{title_text} {meta_text} {body_text}"
+                
+                company_lower = company_name.lower()
+                company_main_word = company_words[0].lower() if company_words else ''
+                
+                # Require company name or main word to appear prominently (in title or first part of content)
+                if company_lower in title_text or company_main_word in title_text:
+                    return True
+                # Also check if main word appears early in content (more reliable)
+                if company_main_word and len(company_main_word) >= 4:
+                    if company_main_word in all_text[:3000]:  # Check first 3000 chars
+                        # Additional check: word should appear at least 2 times or in prominent position
+                        count = all_text[:3000].count(company_main_word)
+                        if count >= 2 or company_main_word in title_text:
+                            return True
+                
+                return False
+        except Exception as e:
+            logger.debug(f"Content verification failed for {domain}: {e}")
+            return False
+    
     def _guess_domain(self, company_name: str) -> Optional[str]:
-        token = ''.join(ch for ch in company_name.lower() if ch.isalnum())
-        if len(token) < 3:
+        """Try common domain patterns based on company name"""
+        if not company_name:
             return None
-        for tld in ['.com', '.io', '.co', '.ai', '.net']:
-            candidate = f"{token}{tld}"
-            for scheme in ('https://', 'http://'):
+        
+        # Clean company name
+        cleaned = re.sub(r'[^\w\s]', '', company_name.lower())
+        words = cleaned.split()
+        
+        # Try different patterns
+        candidates = []
+        
+        # Pattern 1: Full company name (alphanumeric only)
+        token = ''.join(ch for ch in cleaned if ch.isalnum())
+        if len(token) >= 3:
+            candidates.append(token)
+        
+        # Pattern 2: First word only
+        if words and len(words[0]) >= 3:
+            candidates.append(words[0])
+        
+        # Pattern 3: First letter of each word (acronym)
+        if len(words) > 1:
+            acronym = ''.join(w[0] for w in words if w)
+            if len(acronym) >= 2:
+                candidates.append(acronym)
+        
+        # Try candidates with common TLDs
+        tlds = ['.com', '.io', '.co', '.ai', '.net', '.org']
+        for candidate in candidates[:3]:  # Limit to avoid too many requests
+            for tld in tlds:
+                domain = f"{candidate}{tld}"
                 try:
-                    resp = requests.head(f"{scheme}{candidate}", timeout=4, allow_redirects=True)
+                    resp = requests.head(f"https://{domain}", timeout=2, allow_redirects=True)
                     if resp.status_code < 400:
-                        return candidate
+                        # Verify domain actually belongs to company
+                        if self._verify_company_domain(domain, company_name):
+                            logger.info(f"Guessed and verified domain for {company_name}: {domain}")
+                            return domain
+                        else:
+                            logger.debug(f"Guessed domain {domain} exists but doesn't match {company_name}")
                 except Exception:
                     continue
+        
         return None
 
     def _size_from_clearbit(self, domain: str) -> Optional[str]:
@@ -292,7 +409,7 @@ class CompanyEnrichment:
     def _clearbit_request(self, url: str, params: Dict[str, str]) -> Optional[Dict]:
         try:
             headers = {'Authorization': f"Bearer {self.clearbit_key}"}
-            resp = requests.get(url, params=params, headers=headers, timeout=6)
+            resp = requests.get(url, params=params, headers=headers, timeout=3)
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()

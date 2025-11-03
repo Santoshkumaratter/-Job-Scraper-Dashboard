@@ -6,6 +6,7 @@ from ..utils.base_scraper import BaseScraper
 import urllib.parse
 import logging
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,19 @@ class IndeedUKScraper(BaseScraper):
                     location_elem = card.find('div', class_='companyLocation')
                     location = self.clean_text(location_elem.get_text()) if location_elem else ''
                     
-                    # Posted date
-                    date_elem = card.find('span', class_='date')
-                    posted_date = self.parse_date(date_elem.get_text()) if date_elem else None
+                    # Posted date - try multiple selectors
+                    posted_date = None
+                    date_elem = card.find('span', class_='date') or card.find('span', class_='dateText')
+                    if date_elem:
+                        date_text = date_elem.get_text()
+                        if date_text:
+                            posted_date = self.parse_date(date_text)
+                    
+                    # Also try extracting from attributes/data
+                    if not posted_date:
+                        date_attr = card.get('data-date', '') or card.get('data-posted-date', '')
+                        if date_attr:
+                            posted_date = self.parse_date(date_attr)
                     
                     # Check time filter
                     if not self.should_include_job(posted_date):
@@ -101,10 +112,23 @@ class IndeedUKScraper(BaseScraper):
                     description = detail.get('description', '')
                     if detail.get('company'):
                         company = detail['company']
-                    if detail.get('company_url'):
-                        company_url = detail['company_url']
-                    else:
-                        company_url = None
+                    company_url = detail.get('company_url')
+                    
+                    # Fetch company profile/detail page for real company URL and size (if available)
+                    company_profile_url = detail.get('company_profile_url')
+                    if company_profile_url:
+                        profile_data = self._fetch_company_profile(company_profile_url)
+                        if profile_data:
+                            # Use real website URL from company profile
+                            if profile_data.get('website_url'):
+                                company_url = profile_data['website_url']
+                            # Use real company size from profile
+                            if profile_data.get('company_size'):
+                                detail['company_size'] = profile_data['company_size']
+                            # Update company name if different
+                            if profile_data.get('company_name'):
+                                company = profile_data['company_name']
+                    
                     if detail.get('location'):
                         location = detail['location']
                     if detail.get('posted_date'):
@@ -186,15 +210,45 @@ class IndeedUKScraper(BaseScraper):
         if desc_elem:
             detail['description'] = self.clean_text(desc_elem.get_text())
 
+        # Try to extract posted date from visible elements first
+        if 'posted_date' not in detail or not detail['posted_date']:
+            # Look for date in various locations
+            date_selectors = [
+                'span[class*="date"]',
+                'div[class*="date"]',
+                'span.dateText',
+                'div.jobsearch-JobMetadataFooter',
+            ]
+            for selector in date_selectors:
+                date_elem = soup.select_one(selector)
+                if date_elem:
+                    date_text = date_elem.get_text()
+                    parsed_date = self.parse_date(date_text)
+                    if parsed_date:
+                        detail['posted_date'] = parsed_date
+                        break
+
+        # Parse JSON-LD for structured data
         for script in soup.find_all('script', type='application/ld+json'):
             try:
                 data = json.loads(script.get_text(strip=True) or '{}')
             except Exception:
                 continue
-            if not isinstance(data, dict) or data.get('@type') != 'JobPosting':
+            
+            # Handle both JobPosting and single object
+            job_data = data
+            if isinstance(data, dict) and '@graph' in data:
+                # Schema.org might wrap in @graph
+                graph = data.get('@graph', [])
+                for item in graph:
+                    if isinstance(item, dict) and item.get('@type') == 'JobPosting':
+                        job_data = item
+                        break
+            
+            if not isinstance(job_data, dict) or job_data.get('@type') != 'JobPosting':
                 continue
 
-            hiring = data.get('hiringOrganization') or data.get('hiringorganization')
+            hiring = job_data.get('hiringOrganization') or job_data.get('hiringorganization')
             if isinstance(hiring, dict):
                 name = hiring.get('name')
                 if name:
@@ -202,24 +256,67 @@ class IndeedUKScraper(BaseScraper):
                 company_url = hiring.get('sameAs') or hiring.get('url')
                 if company_url:
                     detail['company_url'] = company_url
+                # Try to get company size from hiringOrganization
+                if 'numberOfEmployees' in hiring:
+                    employees = hiring.get('numberOfEmployees')
+                    if isinstance(employees, (int, str)):
+                        detail['company_size'] = self._parse_company_size_from_count(employees)
+                    elif isinstance(employees, dict):
+                        # Schema.org Range format
+                        min_val = employees.get('minValue')
+                        max_val = employees.get('maxValue')
+                        if min_val and max_val:
+                            detail['company_size'] = self._parse_company_size_from_range(min_val, max_val)
 
-            date_posted = data.get('datePosted') or data.get('dateposted')
-            if date_posted:
-                parsed = self.parse_date(date_posted)
-                if parsed:
-                    detail['posted_date'] = parsed
+            # Extract company profile URL from job detail page using BaseScraper method
+            company_profile_url = self._extract_company_profile_url(soup)
+            if company_profile_url:
+                detail['company_profile_url'] = company_profile_url
+            
+            # Extract company size from HTML if not in JSON-LD
+            if 'company_size' not in detail:
+                company_size = self._extract_company_size_from_html(soup)
+                if company_size:
+                    detail['company_size'] = company_size
 
-            employment = data.get('employmentType')
+            # Extract date - try multiple formats
+            if 'posted_date' not in detail or not detail['posted_date']:
+                date_posted = (
+                    job_data.get('datePosted') or 
+                    job_data.get('dateposted') or 
+                    job_data.get('date_posted')
+                )
+                if date_posted:
+                    # Handle ISO format dates (2024-01-15T10:00:00Z)
+                    if isinstance(date_posted, str) and 'T' in date_posted:
+                        try:
+                            from datetime import datetime
+                            # Remove timezone info if present
+                            date_str = date_posted.replace('Z', '').split('T')[0]
+                            dt = datetime.strptime(date_str, '%Y-%m-%d')
+                            detail['posted_date'] = dt.date()
+                        except:
+                            # Fallback to parse_date for other formats
+                            parsed = self.parse_date(date_posted)
+                            if parsed:
+                                detail['posted_date'] = parsed
+                    elif isinstance(date_posted, str):
+                        # Regular date string - use parse_date
+                        parsed = self.parse_date(date_posted)
+                        if parsed:
+                            detail['posted_date'] = parsed
+
+            employment = job_data.get('employmentType')
             if isinstance(employment, list):
                 employment = employment[0] if employment else None
             detail['employment_type'] = employment
 
-            workplace = data.get('jobLocationType') or data.get('workplaceType')
+            workplace = job_data.get('jobLocationType') or job_data.get('workplaceType')
             if isinstance(workplace, list):
                 workplace = workplace[0]
             detail['workplace_type'] = workplace
 
-            job_location = data.get('jobLocation')
+            job_location = job_data.get('jobLocation')
             if isinstance(job_location, list):
                 job_location = job_location[0] if job_location else None
             if isinstance(job_location, dict):
@@ -230,7 +327,7 @@ class IndeedUKScraper(BaseScraper):
                     if location:
                         detail['location'] = location
 
-            salary = data.get('baseSalary')
+            salary = job_data.get('baseSalary')
             if isinstance(salary, dict):
                 value = salary.get('value', {})
                 min_value = value.get('minValue')
@@ -243,4 +340,151 @@ class IndeedUKScraper(BaseScraper):
             break
 
         return detail
+
+    def _parse_company_size_from_count(self, count: any) -> str:
+        """Convert employee count to size category"""
+        try:
+            if isinstance(count, str):
+                count = int(''.join(filter(str.isdigit, count)))
+            else:
+                count = int(count)
+            
+            if count >= 100000:
+                return 'ENTERPRISE'
+            elif count >= 10000:
+                return 'LARGE'
+            elif count >= 1000:
+                return 'MEDIUM'
+            elif count >= 50:
+                return 'SMALL'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
+    
+    def _parse_company_size_from_range(self, min_val: any, max_val: any) -> str:
+        """Convert employee range to size category"""
+        try:
+            if isinstance(min_val, str):
+                min_val = int(''.join(filter(str.isdigit, min_val)))
+            else:
+                min_val = int(min_val)
+            
+            if isinstance(max_val, str):
+                max_val = int(''.join(filter(str.isdigit, max_val)))
+            else:
+                max_val = int(max_val)
+            
+            avg = (min_val + max_val) / 2
+            
+            if avg >= 100000:
+                return 'ENTERPRISE'
+            elif avg >= 10000:
+                return 'LARGE'
+            elif avg >= 1000:
+                return 'MEDIUM'
+            else:
+                return 'SMALL'
+        except:
+            return 'UNKNOWN'
+    
+    def _extract_company_size_from_html(self, soup) -> Optional[str]:
+        """Extract company size from Indeed HTML"""
+        try:
+            text = soup.get_text()
+            
+            # Look for employee count patterns
+            patterns = [
+                r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                r'(\d{1,3}(?:,\d{3})*)\+?\s*employees?',
+                r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 2:
+                        min_val = int(match.group(1).replace(',', ''))
+                        max_val = int(match.group(2).replace(',', ''))
+                        return self._parse_company_size_from_range(min_val, max_val)
+                    else:
+                        count = int(match.group(1).replace(',', ''))
+                        return self._parse_company_size_from_count(count)
+            
+            # Try Indeed-specific selectors
+            size_elem = soup.find('span', class_=re.compile('company-size|employees', re.I))
+            if size_elem:
+                size_text = size_elem.get_text()
+                match = re.search(r'(\d{1,3}(?:,\d{3})*)', size_text)
+                if match:
+                    count = int(match.group(1).replace(',', ''))
+                    return self._parse_company_size_from_count(count)
+        except Exception as e:
+            logger.debug(f"Error extracting company size from HTML: {e}")
+        
+        return None
+
+    def _fetch_company_profile(self, profile_url: str) -> Dict[str, Optional[str]]:
+        """Fetch Indeed company profile to get real company website URL and size"""
+        profile_data = {}
+        if not profile_url:
+            return profile_data
+        
+        try:
+            html = self.make_request(profile_url, use_selenium=True)
+            if not html:
+                return profile_data
+            
+            soup = self.parse_html(html)
+            
+            # Extract company website URL from Indeed company profile
+            website_selectors = [
+                'a[href^="http"]:not([href*="indeed.com"])',
+                '.company-website a',
+                'a.company-link[href^="http"]',
+            ]
+            
+            for selector in website_selectors:
+                website_link = soup.select_one(selector)
+                if website_link:
+                    href = website_link.get('href', '')
+                    if href and href.startswith('http') and 'indeed.com' not in href:
+                        profile_data['website_url'] = href
+                        logger.info(f"Found website URL from Indeed company profile: {href}")
+                        break
+            
+            # Extract company size from Indeed company profile
+            all_text = soup.get_text()
+            size_patterns = [
+                r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                r'(\d{1,3}(?:,\d{3})*)\s*employees?',
+            ]
+            
+            for pattern in size_patterns:
+                match = re.search(pattern, all_text, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 2:
+                        min_val = int(match.group(1).replace(',', ''))
+                        max_val = int(match.group(2).replace(',', ''))
+                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                        logger.info(f"Found company size from Indeed profile: {min_val}-{max_val}")
+                        break
+                    else:
+                        count = int(match.group(1).replace(',', ''))
+                        profile_data['company_size'] = self._parse_company_size_from_count(count)
+                        logger.info(f"Found company size from Indeed profile: {count}")
+                        break
+            
+            # Extract company name from profile
+            company_name_elem = soup.find('h1') or soup.find('h2', class_='company-name')
+            if company_name_elem:
+                company_name = self.clean_text(company_name_elem.get_text())
+                if company_name:
+                    profile_data['company_name'] = company_name
+            
+        except Exception as e:
+            logger.debug(f"Error fetching Indeed company profile from {profile_url}: {e}")
+        
+        return profile_data
 

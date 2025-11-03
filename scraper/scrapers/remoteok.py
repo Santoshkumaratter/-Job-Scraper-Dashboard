@@ -40,8 +40,7 @@ class RemoteOKScraper(BaseScraper):
             
             logger.info(f"Remote OK API returned {len(job_listings)} jobs")
             
-            # ⚡ Limit for INSTANT results - only process first 20 jobs
-            job_listings = job_listings[:20]
+            # Process ALL jobs from API (no limit) - user wants all available jobs
             
             logger.info(f"Processing {len(job_listings)} jobs...")
             

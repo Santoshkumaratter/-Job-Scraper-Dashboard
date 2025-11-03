@@ -40,8 +40,7 @@ class RemotiveScraper(BaseScraper):
                 data = response.json()
                 job_listings = data.get('jobs', [])
                 
-                # Soft cap per keyword for instant results
-                job_listings = job_listings[:30]
+                # Process ALL jobs from API (no limit per keyword) - user wants all available jobs
 
                 for job_data in job_listings:
                     try:
