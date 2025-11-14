@@ -12,7 +12,11 @@ class SEOJobsScraper(BaseScraper):
         return "https://www.seojobs.com"
     
     def build_search_url(self, keyword: str) -> str:
-        return f"{self.base_url}/search?q={keyword}"
+        # Try alternative URL formats - SEOJobs might have changed structure
+        from urllib.parse import quote_plus
+        encoded = quote_plus(keyword)
+        # Try jobs page instead of search
+        return f"{self.base_url}/jobs?q={encoded}"
     
     def scrape_jobs(self) -> List[Dict]:
         jobs = []

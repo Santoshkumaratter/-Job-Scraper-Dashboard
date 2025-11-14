@@ -5,19 +5,50 @@ import time
 import logging
 import re
 import requests
+import random
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from django.conf import settings
 
-
 logger = logging.getLogger(__name__)
+
+# ✅ STEP 1: Use fake-useragent for random browser headers
+try:
+    from fake_useragent import UserAgent
+    ua = UserAgent()
+    FAKE_USERAGENT_AVAILABLE = True
+except ImportError:
+    FAKE_USERAGENT_AVAILABLE = False
+    logger.warning("fake-useragent not installed. Install with: pip install fake-useragent")
+
+# ✅ STEP 4: Use undetected-chromedriver for stealth mode
+try:
+    import undetected_chromedriver as uc
+    UNDETECTED_CHROME_AVAILABLE = True
+except ImportError:
+    UNDETECTED_CHROME_AVAILABLE = False
+    logger.warning("undetected-chromedriver not installed. Install with: pip install undetected-chromedriver")
+
+# ✅ STEP 2: Free Proxy APIs for rotating proxy pool
+PROXY_APIS = [
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=5000&country=all",
+    "https://www.proxy-list.download/api/v1/get?type=http",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+]
+
+# Cache for proxy list to avoid fetching on every request
+_PROXY_CACHE = []
+_PROXY_CACHE_TIME = 0
+PROXY_CACHE_DURATION = 300  # 5 minutes
 
 
 class BaseScraper(ABC):
@@ -43,11 +74,14 @@ class BaseScraper(ABC):
         self.timeout = 8  # Balanced timeout - fast but ensures all jobs are fetched
         self.rate_limit = 0.5  # Reduced delay for faster scraping but prevents rate limiting
         self.jobs_data = []
-        self.max_jobs_per_keyword = 50  # More results per keyword
+        self.max_jobs_per_keyword = 500  # Increased limit to fetch maximum jobs per keyword (500+ jobs)
         
-        # Request headers - Enhanced to avoid blocking
+        # ✅ FREE TOOLS: Use fake-useragent for random browser headers
+        self._get_random_user_agent = self._init_fake_useragent()
+        
+        # Request headers - Enhanced to avoid blocking (using free tools)
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': self._get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
@@ -58,22 +92,17 @@ class BaseScraper(ABC):
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
-            'DNT': '1'
+            'DNT': '1',
+            'Referer': 'https://www.google.com/',  # Look like coming from Google
         }
         self.session = None
         
-        # Proxy/User-Agent rotation (config via settings)
-        self.proxy_list: List[str] = getattr(settings, 'SCRAPER_HTTP_PROXIES', []) or []
+        # ✅ FREE TOOLS: No paid proxies/APIs - use free rotation only
+        self.proxy_list: List[str] = getattr(settings, 'SCRAPER_HTTP_PROXIES', []) or []  # Free proxies if configured
         self._proxy_index: int = 0
-        self.user_agents: List[str] = getattr(settings, 'SCRAPER_USER_AGENTS', []) or [
-            self.headers['User-Agent'],
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-        ]
-        self._ua_index: int = 0
         self._bad_proxies: set[str] = set()
-        self.scraperapi_key: str = getattr(settings, 'SCRAPERAPI_KEY', '') or ''
-        self.scraperapi_render: bool = bool(getattr(settings, 'SCRAPERAPI_RENDER', False))
+        
+        # ✅ REMOVED: ScraperAPI (paid service) - using free tools only
     
     @property
     @abstractmethod
@@ -92,8 +121,125 @@ class BaseScraper(ABC):
         """Override if scraper requires Selenium"""
         return False
     
+    def _init_fake_useragent(self):
+        """✅ STEP 1: Initialize fake-useragent for random browser headers"""
+        if FAKE_USERAGENT_AVAILABLE:
+            try:
+                return lambda: ua.random
+            except:
+                pass
+        # Fallback to hardcoded user agents if fake-useragent not available
+        fallback_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        ]
+        return lambda: random.choice(fallback_agents)
+    
+    def _get_rotating_headers(self):
+        """✅ STEP 1: Get rotating headers with random User-Agent and Accept-Language"""
+        random_ua = self._get_random_user_agent()
+        accept_languages = [
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.8",
+            "en-US,en;q=0.9,es;q=0.8",
+            "en-GB,en;q=0.9,fr;q=0.8"
+        ]
+        
+        return {
+            'User-Agent': random_ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': random.choice(accept_languages),
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'DNT': '1',
+            'Referer': 'https://www.google.com/',
+        }
+    
+    def _fetch_free_proxies(self):
+        """✅ STEP 2: Fetch free proxies from public APIs"""
+        global _PROXY_CACHE, _PROXY_CACHE_TIME
+        
+        # Use cached proxies if available and not expired
+        current_time = time.time()
+        if _PROXY_CACHE and (current_time - _PROXY_CACHE_TIME) < PROXY_CACHE_DURATION:
+            return _PROXY_CACHE
+        
+        proxy_list = []
+        for api_url in PROXY_APIS:
+            try:
+                response = requests.get(api_url, timeout=10)
+                if response.status_code == 200:
+                    proxies = response.text.strip().split('\n')
+                    proxy_list.extend([p.strip() for p in proxies if p.strip()])
+            except Exception as e:
+                logger.debug(f"Failed to fetch proxies from {api_url}: {e}")
+                continue
+        
+        # Update cache
+        if proxy_list:
+            _PROXY_CACHE = list(set(proxy_list))  # Remove duplicates
+            _PROXY_CACHE_TIME = current_time
+            logger.info(f"Loaded {len(_PROXY_CACHE)} proxies from public APIs")
+        
+        return _PROXY_CACHE
+    
+    def _get_random_proxy_dict(self):
+        """✅ STEP 2: Get random proxy for requests"""
+        # First try configured proxies from settings
+        if self.proxy_list and len(self.proxy_list) > 0:
+            proxy_url = random.choice(self.proxy_list)
+            if proxy_url and not self._is_proxy_placeholder(proxy_url):
+                return {'http': proxy_url, 'https': proxy_url}
+        
+        # Fallback to free proxies
+        free_proxies = self._fetch_free_proxies()
+        if free_proxies:
+            proxy = random.choice(free_proxies)
+            return {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+        
+        return None
+    
     def get_driver(self, proxy: Optional[str] = None):
-        """Initialize and return Selenium WebDriver with anti-detection"""
+        """✅ STEP 4: Initialize and return Selenium WebDriver with stealth mode (undetected-chromedriver)"""
+        import os
+        import sys
+        
+        # ✅ Use undetected-chromedriver for maximum stealth
+        if UNDETECTED_CHROME_AVAILABLE:
+            try:
+                options = uc.ChromeOptions()
+                options.add_argument('--headless=new')
+                options.add_argument('--no-sandbox')
+                options.add_argument('--disable-dev-shm-usage')
+                options.add_argument('--disable-gpu')
+                
+                # Add proxy if provided
+                if proxy:
+                    options.add_argument(f'--proxy-server={proxy}')
+                
+                # Suppress logging
+                options.add_argument('--log-level=3')
+                options.add_argument('--silent')
+                
+                # Create undetected Chrome driver (bypasses Cloudflare, CAPTCHA)
+                driver = uc.Chrome(options=options, use_subprocess=False)
+                driver.set_page_load_timeout(30)
+                driver.implicitly_wait(3)
+                
+                return driver
+            except Exception as e:
+                logger.warning(f"Failed to create undetected Chrome driver: {e}. Falling back to regular Chrome.")
+        
+        # Fallback to regular Chrome with anti-detection
         chrome_options = Options()
         chrome_options.add_argument('--headless=new')
         chrome_options.add_argument('--no-sandbox')
@@ -105,129 +251,230 @@ class BaseScraper(ABC):
         chrome_options.add_argument('--disable-logging')
         chrome_options.add_argument('--log-level=3')
         chrome_options.add_argument('--silent')
-        chrome_options.add_argument('--disable-web-security')
-        chrome_options.add_argument('--ignore-certificate-errors')
-        # Suppress GPU errors
-        chrome_options.add_argument('--disable-gl-drawing-for-tests')
-        chrome_options.add_argument('--disable-accelerated-2d-canvas')
-        chrome_options.add_argument('--disable-accelerated-video-decode')
-        chrome_options.add_argument('--use-gl=swiftshader')
-        chrome_options.add_argument(f'user-agent={self.headers["User-Agent"]}')
+        chrome_options.add_argument(f'user-agent={self._get_random_user_agent()}')
         chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        # Suppress console logs and notifications
-        import os
-        import sys
         chrome_options.add_experimental_option('prefs', {
             'profile.default_content_setting_values.notifications': 2,
         })
         
-        # Suppress ALL DevTools and GPU messages
-        if sys.platform == 'win32':
-            chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-        
-        # Suppress output completely
-        chrome_options.add_argument('--disable-infobars')
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
-        
-        # Create driver with suppressed output
-        import logging
-        logging.getLogger('selenium').setLevel(logging.ERROR)
-        
-        # Attach proxy if configured
+        # Add proxy if configured
         if proxy:
             chrome_options.add_argument(f'--proxy-server={proxy}')
         
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.set_page_load_timeout(10)  # 10 second max
-        driver.implicitly_wait(3)  # 3 second implicit wait
+        # Suppress logging
+        os.environ['WDM_LOG_LEVEL'] = '0'
+        os.environ['WDM_PRINT_FIRST_LINE'] = 'False'
         
-        # Execute CDP commands to hide automation
+        service = Service()
+        service.log_path = os.devnull
+        
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(30)
+        driver.implicitly_wait(3)
+        
+        # Hide automation
         try:
             driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-                "userAgent": self.headers["User-Agent"]
+                "userAgent": self._get_random_user_agent()
             })
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         except:
-            pass  # Ignore if fails
+            pass
         
         return driver
     
-    def make_request(self, url: str, use_selenium: bool = False) -> Optional[str]:
+    def make_request(self, url: str, use_selenium: bool = False, retry_count: int = 0) -> Optional[str]:
         """
-        Make HTTP request with error handling and retry logic
+        ✅ OPTIMIZED: Make HTTP request with rotating headers, proxies, and exponential backoff
         
         Args:
             url: URL to request
-            use_selenium: Whether to use Selenium
+            use_selenium: Whether to use Selenium (for JavaScript-heavy sites)
+            retry_count: Current retry attempt (for exponential backoff)
             
         Returns:
             HTML content or None
         """
-        # Try ScraperAPI first if configured (handles proxy rotation automatically)
-        if self.scraperapi_key:
-            render = use_selenium or self.requires_selenium
-            html = self._fetch_via_scraperapi(url, render=render)
-            if html:
-                return html
-            else:
-                logger.warning(f"ScraperAPI request failed for {url}; falling back to direct scraping")
-        # Simple and reliable request logic
         max_retries = 3
         
         for attempt in range(max_retries):
+            driver = None
             try:
                 if use_selenium or self.requires_selenium:
                     proxy = self._get_next_valid_proxy()
                     driver = self.get_driver(proxy)
-                    driver.get(url)
-                    # Wait longer for JavaScript-heavy pages like LinkedIn
-                    time.sleep(5)  # Increased wait time for LinkedIn and similar sites
-                    # Scroll page to trigger lazy loading
+                    
+                    # Set page load timeout to handle slow pages
+                    driver.set_page_load_timeout(30)
+                    
+                    try:
+                        driver.get(url)
+                    except Exception as page_load_err:
+                        # Handle network errors, timeouts, and Selenium exceptions
+                        error_str = str(page_load_err).lower()
+                        error_type = type(page_load_err).__name__
+                        
+                        # Check for network/timeout errors
+                        is_network_error = (
+                            isinstance(page_load_err, (TimeoutException, WebDriverException)) or
+                            'timeout' in error_str or 
+                            'disconnected' in error_str or 
+                            'network' in error_str or
+                            'internet' in error_str or
+                            'connection' in error_str or
+                            error_type in ['TimeoutException', 'WebDriverException', 'ConnectionRefusedError']
+                        )
+                        
+                        if is_network_error:
+                            # Suppress verbose logging - only log critical errors
+                            # Always try to close driver on error
+                            if driver:
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass
+                                driver = None
+                            
+                            # Retry with exponential backoff
+                            if attempt < max_retries - 1:
+                                wait_time = 2 * (attempt + 1)
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                # Only log critical failures
+                                pass
+                                if driver:
+                                    try:
+                                        driver.quit()
+                                    except:
+                                        pass
+                                return None
+                        else:
+                            # Unexpected error - suppress verbose logging
+                            if driver:
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass
+                            raise  # Re-raise if not a network/timeout error
+                    
+                    # Wait for JavaScript-heavy pages - REDUCED for speed
+                    time.sleep(1)  # Reduced from 2s to 1s for faster loading
+                    # Quick scroll to trigger lazy loading
                     try:
                         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-                        time.sleep(2)
+                        time.sleep(0.5)  # Reduced from 1s to 0.5s
                         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                        time.sleep(2)
+                        time.sleep(0.5)  # Reduced from 1s to 0.5s
                     except:
                         pass
+                    
+                    # Check for captcha or blocking
                     html = driver.page_source
-                    driver.quit()
+                    if self._is_blocked_or_captcha(html, driver):
+                        logger.warning(f"Captcha or blocking detected for {url}, trying with different proxy/user agent")
+                        if driver:
+                            try:
+                                driver.quit()
+                            except:
+                                pass
+                            driver = None
+                        
+                        # Rotate proxy and user agent
+                        if attempt < max_retries - 1:
+                            self._proxy_index += 1  # Rotate proxy
+                            self.headers['User-Agent'] = self._get_random_user_agent()  # Rotate UA
+                            time.sleep(3 * (attempt + 1))  # Wait longer before retry
+                            continue
+                        else:
+                            logger.error(f"Failed to bypass captcha/blocking after {max_retries} attempts")
+                            return None
+                    
+                    # Always close driver when done
+                    try:
+                        if driver:
+                            driver.quit()
+                    except:
+                        pass
+                    
+                    if not html or len(html) < 100:
+                        # Suppress verbose logging
+                        if attempt < max_retries - 1:
+                            time.sleep(2 * (attempt + 1))
+                            continue
+                    
                     return html
                 else:
-                    # Use session for connection pooling
+                    # ✅ STEP 3: Add random delay before request (anti-detection)
+                    if attempt > 0:
+                        delay = random.uniform(0.5, 2.0) * (2 ** attempt)  # Exponential backoff
+                        time.sleep(delay)
+                    else:
+                        time.sleep(random.uniform(0.1, 0.5))  # Small random delay
+                    
+                    # ✅ STEP 1: Use rotating headers with random User-Agent
                     if not self.session:
                         self.session = requests.Session()
-                        self.session.headers.update(self.headers)
                     
-                    # Rotate UA and proxy per attempt
-                    ua = self._get_next_user_agent()
-                    self.session.headers.update({'User-Agent': ua})
-                    proxy_url = self._get_next_valid_proxy()
-                    if not proxy_url and self.proxy_list:
-                        logger.warning("All configured proxies exhausted or invalid; falling back to direct connection")
-                        self._bad_proxies.clear()
-                    proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
+                    # Get fresh rotating headers for each request
+                    headers = self._get_rotating_headers()
+                    self.session.headers.update(headers)
+                    
+                    # ✅ STEP 2: Use rotating proxies (free or configured)
+                    proxies = self._get_random_proxy_dict()
                     
                     try:
-                        response = self.session.get(url, timeout=self.timeout, proxies=proxies)
+                        # Increase timeout for slow portals - some sites need more time
+                        timeout = max(self.timeout, 20)  # At least 20 seconds for slow portals like cwjobs
+                        response = self.session.get(url, timeout=timeout, proxies=proxies)
+                    except requests.exceptions.Timeout as timeout_err:
+                        # Suppress verbose logging - only retry
+                        if attempt < max_retries - 1:
+                            wait_time = 2 * (attempt + 1)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            return None
+                    except requests.exceptions.ConnectionError as conn_err:
+                        error_str = str(conn_err).lower()
+                        # Handle DNS resolution errors silently
+                        if 'name resolution' in error_str or 'getaddrinfo failed' in error_str or 'failed to resolve' in error_str:
+                            if attempt < max_retries - 1:
+                                continue
+                            else:
+                                return None
+                        if proxy_url:
+                            self._bad_proxies.add(proxy_url)
+                            continue
+                        else:
+                            continue
                     except Exception as prox_err:
                         if proxy_url:
                             self._bad_proxies.add(proxy_url)
-                            logger.warning(f"Proxy failed {proxy_url}: {prox_err}")
                             continue
                         else:
-                            logger.warning(f"Direct request failed: {prox_err}")
                             continue
                     
-                    # If 403, try with Selenium
+                    # Check for captcha or blocking in response
+                    if self._is_blocked_or_captcha(response.text, None):
+                        logger.warning(f"Captcha or blocking detected for {url}, trying with Selenium")
+                        if proxy_url:
+                            self._bad_proxies.add(proxy_url)
+                        # Rotate proxy and user agent
+                        if attempt < max_retries - 1:
+                            self._proxy_index += 1
+                            self.headers['User-Agent'] = self._get_random_user_agent()
+                            time.sleep(3 * (attempt + 1))
+                            continue
+                        # Try with Selenium as fallback
+                        return self.make_request(url, use_selenium=True)
+                    
+                    # If 403, 429, try with Selenium (silently)
                     if response.status_code in (403, 429):
                         if proxy_url:
-                            logger.warning(f"Proxy blocked with status {response.status_code}; rotating")
                             self._bad_proxies.add(proxy_url)
-                            continue
-                        logger.warning(f"Got status {response.status_code}, trying with Selenium: {url}")
+                        # Try with Selenium without verbose logging
                         return self.make_request(url, use_selenium=True)
                     
                     response.raise_for_status()
@@ -235,11 +482,11 @@ class BaseScraper(ABC):
                     
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Retry {attempt + 1} for {url}")
+                    # Suppress verbose logging - just retry
                     time.sleep(2)
                     continue
                 else:
-                    logger.error(f"Error fetching {url}: {str(e)}")
+                    # Suppress verbose error logging
                     return None
         
         return None
@@ -247,6 +494,42 @@ class BaseScraper(ABC):
     def parse_html(self, html: str) -> BeautifulSoup:
         """Parse HTML content with BeautifulSoup"""
         return BeautifulSoup(html, 'lxml')
+    
+    def ensure_real_data(self, job_data: Dict) -> Dict:
+        """
+        Ensure all fields have real data - no "Unknown" values
+        Infers company from URL if missing, ensures all fields are populated
+        """
+        from urllib.parse import urlparse
+        
+        # Remove "Unknown" values
+        if job_data.get('company', '').lower() in ['unknown', '']:
+            # Try to infer company from job link
+            job_link = job_data.get('job_link', '')
+            if job_link:
+                try:
+                    domain = urlparse(job_link).netloc
+                    if domain:
+                        company = domain.replace('www.', '').split('.')[0].title()
+                        if company and company.lower() not in ['job', 'jobs', 'career', 'careers']:
+                            job_data['company'] = company
+                except:
+                    pass
+            
+            # If still no company, use "Company Not Listed" instead of "Unknown"
+            if not job_data.get('company') or job_data['company'].lower() in ['unknown', '']:
+                job_data['company'] = 'Company Not Listed'
+        
+        # Remove "UNKNOWN" from company_size
+        if job_data.get('company_size', '').upper() in ['UNKNOWN', '']:
+            job_data['company_size'] = ''
+        
+        # Ensure all fields have values (empty string instead of None)
+        for key in ['company_url', 'location', 'job_description', 'salary_range']:
+            if job_data.get(key) is None:
+                job_data[key] = ''
+        
+        return job_data
     
     def parse_date(self, date_str: str) -> Optional[datetime]:
         """
@@ -453,32 +736,30 @@ class BaseScraper(ABC):
         return ' '.join(text.split()).strip()
     
     def rate_limit_delay(self):
-        """Apply rate limiting delay - MINIMAL for speed"""
-        time.sleep(self.rate_limit)  # Use configured rate limit
+        """✅ STEP 3: Apply rate limiting delay with randomness"""
+        # Add random jitter to avoid detection patterns
+        delay = self.rate_limit + random.uniform(0, 0.3)
+        time.sleep(delay)
+    
+    def _validate_job_link(self, job_link: str) -> bool:
+        """✅ STEP 6: Validate job link is accessible and returns 200 OK"""
+        if not job_link:
+            return False
+        
+        try:
+            # Quick HEAD request to check if link is valid
+            response = requests.head(job_link, timeout=5, allow_redirects=True)
+            return response.status_code == 200
+        except:
+            # If HEAD fails, try GET with short timeout
+            try:
+                response = requests.get(job_link, timeout=5, allow_redirects=True)
+                return response.status_code == 200
+            except:
+                return False
 
     # ===== Utility: Rotation helpers =====
-    def _fetch_via_scraperapi(self, url: str, render: bool = False) -> Optional[str]:
-        if not self.scraperapi_key:
-            return None
-        params = {
-            'api_key': self.scraperapi_key,
-            'url': url,
-            'keep_headers': 'true',
-        }
-        if render and self.scraperapi_render:
-            params['render'] = 'true'
-        try:
-            response = requests.get(
-                'https://api.scraperapi.com',
-                params=params,
-                timeout=self.timeout,
-                headers=self.headers,
-            )
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            logger.warning(f"ScraperAPI request failed: {e}")
-            return None
+    # ✅ REMOVED: ScraperAPI method - using free tools only (requests + fake-useragent)
 
     def _get_next_proxy(self) -> Optional[str]:
         if not self.proxy_list:
@@ -536,20 +817,27 @@ class BaseScraper(ABC):
         Returns:
             List of all scraped jobs
         """
-        all_jobs = []
+        # Simple user-friendly log
+        keywords_str = ', '.join(self.keywords[:3]) + ('...' if len(self.keywords) > 3 else '')
+        print(f"🔍 {self.portal_name}: Fetching jobs for '{keywords_str}'...")
         
-        for keyword in self.keywords:
-            logger.info(f"{self.portal_name}: Scraping jobs for keyword '{keyword}'")
-            try:
-                jobs = self.scrape_jobs()
-                all_jobs.extend(jobs)
-                logger.info(f"{self.portal_name}: Found {len(jobs)} jobs for '{keyword}'")
-            except Exception as e:
-                logger.error(f"{self.portal_name}: Error scraping '{keyword}': {str(e)}")
+        try:
+            start_time = time.time()
+            # Call scrape_jobs() once - it handles all keywords internally
+            jobs = self.scrape_jobs()
+            elapsed = time.time() - start_time
             
-            self.rate_limit_delay()
-        
-        return all_jobs
+            # Simple user-friendly result
+            if jobs:
+                print(f"✅ {self.portal_name}: Found {len(jobs)} jobs ({elapsed:.1f}s)")
+            else:
+                print(f"⚠️ {self.portal_name}: No jobs found")
+            
+            return jobs
+        except Exception as e:
+            print(f"❌ {self.portal_name}: Error - {str(e)}")
+            logger.error(f"{self.portal_name}: Error scraping: {str(e)}")
+            return []
 
     def _extract_company_profile_url(self, soup: BeautifulSoup) -> Optional[str]:
         """
@@ -560,37 +848,59 @@ class BaseScraper(ABC):
         
         # Common patterns for company profile URLs across different portals
         patterns = [
-            r'/company/[^/]+',  # LinkedIn, Dice, etc.
-            r'/employer/[^/]+',  # Dice, CV-Library
-            r'/employers/[^/]+',  # CV-Library
-            r'/cmp/[^/]+',  # Indeed
-            r'/company/[^/?]+',  # General company URLs
-            r'/employer/[^/?]+',  # General employer URLs
+            r'/company/[^/\s"\']+',  # LinkedIn: /company/perplexity
+            r'/employer/[^/\s"\']+',  # Dice: /employer/xyz
+            r'/employers/[^/\s"\']+',  # CV-Library: /employers/xyz
+            r'/cmp/[^/\s"\']+',  # Indeed: /cmp/xyz
+            r'/companies/[^/\s"\']+',  # General: /companies/xyz
+            r'/org/[^/\s"\']+',  # General: /org/xyz
         ]
         
-        # Look for company profile links in HTML
-        for pattern in patterns:
-            company_link = soup.find('a', href=re.compile(pattern, re.I))
-            if company_link:
-                href = company_link.get('href', '')
-                if href:
+        # Look for company profile links in HTML - check all links
+        all_links = soup.find_all('a', href=True)
+        domain = self.base_url.split('//')[1].split('/')[0] if '//' in self.base_url else ''
+        
+        for link in all_links:
+            href = link.get('href', '').strip()
+            if not href:
+                continue
+            
+            # Check if href matches any company profile pattern
+            for pattern in patterns:
+                # Use regex to match pattern
+                import re
+                if re.search(pattern, href, re.I):
+                    # Make full URL if relative
                     if href.startswith('/'):
-                        return urllib.parse.urljoin(self.base_url, href)
-                    elif self.base_url.split('//')[1].split('/')[0] in href:  # Same domain
+                        full_url = urllib.parse.urljoin(self.base_url, href)
+                        logger.debug(f"Found company profile URL: {full_url} (from pattern: {pattern})")
+                        return full_url
+                    elif href.startswith('http') and domain in href:
+                        logger.debug(f"Found company profile URL: {href} (from pattern: {pattern})")
                         return href
+        
+        company_keywords = ['company', 'employer', 'employers', 'cmp', 'org', 'organization']
+        for link in all_links:
+            href = link.get('href', '').strip()
+            if not href:
+                continue
+            
+            # Check if link text or href contains company-related keywords
+            link_text = (link.get_text() or '').lower()
+            href_lower = href.lower()
+            
+            if any(kw in href_lower for kw in company_keywords):
+                # Make sure it's not the same as base URL
+                if domain and domain in href and href.startswith('http'):
+                    if href.startswith('/'):
+                        full_url = urllib.parse.urljoin(self.base_url, href)
+                        logger.debug(f"Found company profile URL (keyword match): {full_url}")
+                        return full_url
                     elif href.startswith('http'):
+                        logger.debug(f"Found company profile URL (keyword match): {href}")
                         return href
         
-        # Also check for company name links (many portals use company name as clickable link)
-        company_name_links = soup.find_all('a', href=True)
-        for link in company_name_links:
-            href = link.get('href', '')
-            if any(pattern.replace('[^/]+', '').replace('[^/?]+', '') in href for pattern in patterns):
-                if href.startswith('/'):
-                    return urllib.parse.urljoin(self.base_url, href)
-                elif href.startswith('http'):
-                    return href
-        
+        logger.debug("No company profile URL found in job detail page")
         return None
 
     def _fetch_company_profile(self, profile_url: str) -> Dict[str, Optional[str]]:
@@ -634,9 +944,14 @@ class BaseScraper(ABC):
                             if 'url' in params:
                                 href = params['url'][0]
                         if href and href.startswith('http') and domain not in href.lower():
-                            profile_data['website_url'] = href
-                            logger.info(f"Found website URL from {self.portal_name} company profile: {href}")
-                            break
+                            # Additional validation - make sure it's a real website, not a job portal
+                            invalid_domains = [domain, 'linkedin.com', 'indeed.com', 'glassdoor.com', 'monster.com', 'jobs.', 'careers.']
+                            if not any(inv_domain in href.lower() for inv_domain in invalid_domains if inv_domain):
+                                profile_data['website_url'] = href
+                                logger.info(f"✅ Found website URL from {self.portal_name} company profile: {href}")
+                                break
+                            else:
+                                logger.debug(f"⚠️ Skipped invalid website URL: {href}")
                 except:
                     continue
             
@@ -663,7 +978,6 @@ class BaseScraper(ABC):
                 except:
                     continue
             
-            # Method 2: Extract from HTML text patterns
             if 'company_size' not in profile_data:
                 all_text = soup.get_text()
                 size_patterns = [
@@ -708,14 +1022,12 @@ class BaseScraper(ABC):
             else:
                 count = int(count)
             
-            if count >= 100000:
+            if count >= 10001:
                 return 'ENTERPRISE'
-            elif count >= 10000:
+            elif count >= 1001:
                 return 'LARGE'
-            elif count >= 1000:
+            elif count >= 51:
                 return 'MEDIUM'
-            elif count >= 50:
-                return 'SMALL'
             else:
                 return 'SMALL'
         except:
@@ -734,16 +1046,80 @@ class BaseScraper(ABC):
             else:
                 max_val = int(max_val)
             
-            avg = (min_val + max_val) / 2
-            
-            if avg >= 100000:
+            if max_val >= 10001:
                 return 'ENTERPRISE'
-            elif avg >= 10000:
+            elif max_val >= 1001:
                 return 'LARGE'
-            elif avg >= 1000:
+            elif max_val >= 51:
                 return 'MEDIUM'
             else:
                 return 'SMALL'
         except:
             return 'UNKNOWN'
+    
+    def _is_blocked_or_captcha(self, html: str, driver=None) -> bool:
+        """
+        Detect if page is blocked or shows captcha
+        
+        Args:
+            html: HTML content or response text
+            driver: Optional Selenium driver for additional checks
+            
+        Returns:
+            True if blocked/captcha detected, False otherwise
+        """
+        if not html:
+            return False
+        
+        html_lower = html.lower()
+        
+        # Common captcha indicators
+        captcha_indicators = [
+            'captcha',
+            'recaptcha',
+            'hcaptcha',
+            'cloudflare',
+            'checking your browser',
+            'please wait',
+            'access denied',
+            'blocked',
+            'unusual traffic',
+            'verify you are human',
+            'challenge',
+            'security check',
+            'rate limit',
+            'too many requests'
+        ]
+        
+        # Check HTML content
+        for indicator in captcha_indicators:
+            if indicator in html_lower:
+                return True
+        
+        # Check page title
+        if driver:
+            try:
+                title = driver.title.lower()
+                for indicator in captcha_indicators:
+                    if indicator in title:
+                        return True
+            except:
+                pass
+        
+        # Check for common blocking patterns
+        blocking_patterns = [
+            '403 forbidden',
+            '429 too many',
+            'access denied',
+            'forbidden',
+            'blocked by',
+            'your ip has been',
+            'temporarily blocked'
+        ]
+        
+        for pattern in blocking_patterns:
+            if pattern in html_lower:
+                return True
+        
+        return False
 

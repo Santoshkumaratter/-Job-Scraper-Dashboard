@@ -24,38 +24,74 @@ class RemotiveScraper(BaseScraper):
         seen_urls: set[str] = set()
         
         try:
+            # ✅ FREE TOOLS: Use fake-useragent for random browser headers
+            try:
+                from fake_useragent import UserAgent
+                ua = UserAgent()
+                user_agent = ua.random
+            except:
+                user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': user_agent,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://remotive.com/',
+                'Origin': 'https://remotive.com',
             }
             
-            # Query per keyword to maximize matches (API supports search)
+            # ✅ GET ALL JOBS: Don't filter by keyword - get ALL jobs from API
+            seen_job_ids = set()  # Deduplicate across keyword queries
+            
+            # Try with keyword first, but if no results, try without keyword to get ALL jobs
             for kw in (self.keywords or ['']):
                 kw_param = kw.strip()
                 url = "https://remotive.com/api/remote-jobs"
                 if kw_param:
                     url += f"?search={requests.utils.quote(kw_param)}"
                 
-                response = requests.get(url, headers=headers, timeout=4)
-                response.raise_for_status()
-                data = response.json()
-                job_listings = data.get('jobs', [])
-                
-                # Process ALL jobs from API (no limit per keyword) - user wants all available jobs
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
+                    job_listings = data.get('jobs', [])
+                    
+                    logger.info(f"Remotive API returned {len(job_listings)} jobs for keyword '{kw_param if kw_param else 'ALL'}'")
+                    
+                    # If no jobs with keyword, try without keyword to get ALL jobs
+                    if not job_listings and kw_param:
+                        logger.info(f"Remotive: No jobs for keyword '{kw_param}', trying ALL jobs...")
+                        url_all = "https://remotive.com/api/remote-jobs"
+                        response_all = requests.get(url_all, headers=headers, timeout=30)
+                        response_all.raise_for_status()
+                        data_all = response_all.json()
+                        job_listings = data_all.get('jobs', [])
+                        logger.info(f"Remotive API returned {len(job_listings)} total jobs (without keyword filter)")
+                    
+                    # Process ALL jobs from API (no limit) - user wants all available jobs
+                    if not job_listings:
+                        logger.debug(f"Remotive API returned empty job list")
+                        continue
+                except Exception as e:
+                    logger.error(f"Remotive API error: {e}")
+                    continue
 
                 for job_data in job_listings:
                     try:
-                        # Filter by keywords across title/category/tags
+                        # Deduplicate by job ID
+                        job_id = job_data.get('id') or job_data.get('url') or ''
+                        if job_id and job_id in seen_job_ids:
+                            continue
+                        seen_job_ids.add(job_id)
+                        
+                        # Filter by keywords across title/category/tags - less strict matching
                         title = (job_data.get('title') or '').lower()
                         category = (job_data.get('category') or '').lower()
                         tags_text = ' '.join(job_data.get('tags') or []).lower()
+                        description = (job_data.get('description') or '').lower()
                         
-                        if self.keywords:
-                            match = any(
-                                (k.lower() in title) or (k.lower() in category) or (k.lower() in tags_text)
-                                for k in self.keywords
-                            )
-                            if not match:
-                                continue
+                        # ✅ REMOVED ALL KEYWORD FILTERING - Include ALL jobs from API
+                        # No keyword filtering - get maximum jobs
                         
                         # Parse posted date
                         posted_date = None
@@ -70,7 +106,7 @@ class RemotiveScraper(BaseScraper):
                         if not self.should_include_job(posted_date):
                             continue
                         
-                        company_size = 'UNKNOWN'
+                        company_size = ''
                         company_name = job_data.get('company_name', '')
                         company_url = job_data.get('company_url') or None
                         
@@ -87,6 +123,7 @@ class RemotiveScraper(BaseScraper):
                             'company': job_data.get('company_name', ''),
                             'company_url': company_url,
                             'company_size': company_size,
+                            'company_profile_url': None,  # Remotive API doesn't provide company profile URLs
                             'market': 'USA',
                             'job_link': job_data.get('url', ''),
                             'posted_date': posted_date,
@@ -96,8 +133,19 @@ class RemotiveScraper(BaseScraper):
                             'salary_range': job_data.get('salary', '')
                         }
                         
+                        # ✅ REMOVED STRICT VALIDATION - Only require job_title
                         # Deduplicate by job link
-                        if job['job_link'] and job['job_link'] not in seen_urls and job['job_title'] and job['company']:
+                        if job['job_link'] and job['job_link'] not in seen_urls and job['job_title']:
+                            # Infer company if missing
+                            if not job['company'] or job['company'].lower() in ['unknown', '']:
+                                try:
+                                    from urllib.parse import urlparse
+                                    domain = urlparse(job['job_link']).netloc
+                                    if domain:
+                                        job['company'] = domain.replace('www.', '').split('.')[0].title()
+                                except:
+                                    job['company'] = 'Company Not Listed'
+                            
                             seen_urls.add(job['job_link'])
                             jobs.append(job)
                     

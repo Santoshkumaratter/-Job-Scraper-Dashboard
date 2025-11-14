@@ -12,14 +12,15 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Setting up job portals...'))
         
         portals = [
-            {'name': 'Indeed UK', 'base_url': 'https://uk.indeed.com', 'requires_selenium': False, 'priority': 10},
+            # Removed Indeed UK and Glassdoor due to blocking issues
+            # {'name': 'Indeed UK', 'base_url': 'https://uk.indeed.com', 'requires_selenium': False, 'priority': 10},
             {'name': 'Linkedin Jobs', 'base_url': 'https://www.linkedin.com', 'requires_selenium': True, 'priority': 10},
             {'name': 'CV-Library', 'base_url': 'https://www.cv-library.co.uk', 'requires_selenium': False, 'priority': 8},
             {'name': 'Adzuna', 'base_url': 'https://www.adzuna.co.uk', 'requires_selenium': False, 'priority': 7},
             {'name': 'Totaljobs', 'base_url': 'https://www.totaljobs.com', 'requires_selenium': False, 'priority': 8},
             {'name': 'Reed', 'base_url': 'https://www.reed.co.uk', 'requires_selenium': False, 'priority': 9},
             {'name': 'Talent', 'base_url': 'https://www.talent.com', 'requires_selenium': False, 'priority': 6},
-            {'name': 'Glassdoor', 'base_url': 'https://www.glassdoor.com', 'requires_selenium': True, 'priority': 9},
+            # {'name': 'Glassdoor', 'base_url': 'https://www.glassdoor.com', 'requires_selenium': True, 'priority': 9},
             {'name': 'ZipRecruiter', 'base_url': 'https://www.ziprecruiter.com', 'requires_selenium': False, 'priority': 8},
             {'name': 'CWjobs', 'base_url': 'https://www.cwjobs.co.uk', 'requires_selenium': False, 'priority': 7},
             {'name': 'Jobsora', 'base_url': 'https://www.jobsora.com', 'requires_selenium': False, 'priority': 5},
@@ -67,22 +68,74 @@ class Command(BaseCommand):
         # Setup Keywords
         self.stdout.write(self.style.SUCCESS('\nSetting up keywords...'))
         
+        # Technical Keywords - Updated as per requirements
         technical_keywords = [
-            'React Native Developer', 'Senior React Native Developer', 'Mobile Application Developer',
-            'Full Stack Developer', 'Senior Full Stack Developer', 'Software Engineer',
-            'Python Developer', 'Django Developer', 'FastAPI Engineer',
-            'DevOps Engineer', 'Cloud Engineer', 'AWS Engineer',
-            'AI Engineer', 'Machine Learning Engineer', 'LLM Engineer',
-            'Frontend Developer', 'Backend Engineer', 'Data Engineer'
+            # React Native Keywords
+            'React Native',
+            'React Native Developer',
+            'Senior React Native Developer',
+            'Lead React Native Developer',
+            'Mobile Application Developer (React Native)',
+            'Mobile Engineer (iOS+Android – React Native)',
+            'Frontend Developer (React Native)',
+            'Cross-Platform Mobile Developer',
+            'Mobile Software Engineer',
+            'React Developer (with mobile experience)',
+            'Senior Mobile Engineer – React Native',
+            
+            # Full Stack Keywords
+            'Full Stack Developer',
+            'Senior Full Stack Developer',
+            'Lead Full Stack Engineer',
+            'Software Engineer (Python+ JavaScript)',
+            'Backend Engineer (Python+ Django+ FastAPI)',
+            'Principal Software Engineer',
+            'Engineering Lead',
+            'Python Developer',
+            'Senior Python Engineer',
+            'Django Developer',
+            'Django Engineer',
+            'FastAPI Engineer',
+            'Cloud Engineer (AWS+GCP)',
+            'DevOps Engineer (Python + Cloud)',
+            
+            # AI/ML Keywords
+            'AI Engineer',
+            'AI Research Engineer',
+            'Machine Learning Engineer',
+            'LLM Engineer',
+            'Generative AI Engineer',
+            'Applied Scientist (AI+ML)',
+            'AI Software Engineer',
         ]
         
+        # Non-Technical Keywords - Updated as per requirements
         non_technical_keywords = [
-            'SEO Specialist', 'SEO Manager', 'SEO Analyst',
-            'Digital Marketing Specialist', 'Digital Marketing Manager',
-            'PPC Specialist', 'Paid Advertising Manager', 'Media Buyer',
-            'Content Marketing Specialist', 'Growth Marketing Manager',
-            'Marketing Manager', 'Marketing Specialist',
-            'Social Media Manager', 'Email Marketing Specialist'
+            # SEO Keywords
+            'SEO',
+            'SEO Specialist',
+            'SEO Manager',
+            'SEO Analyst',
+            'Search Engine Optimisation Expert',
+            
+            # Digital Marketing Keywords
+            'Digital Marketing',
+            'Digital Marketing Specialist',
+            'Digital Marketing Manager',
+            'Digital Marketer',
+            'Marketing Specialist',
+            'Marketing Manager',
+            'Growth Marketing Manager',
+            'Content Marketing Specialist',
+            
+            # Paid Advertising Keywords
+            'Paid Advertising Manager',
+            'Media Buyer',
+            'Digital Media Manager',
+            'Paid Media Specialist',
+            'Google Ads Expert',
+            'PPC Specialist',
+            'Paid Search Manager',
         ]
         
         keyword_count = 0

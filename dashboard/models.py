@@ -77,7 +77,7 @@ class SavedFilter(models.Model):
     
     # Filter settings
     job_type = models.CharField(max_length=20, choices=JOB_TYPE_CHOICES, default='ALL')
-    time_filter = models.CharField(max_length=10, choices=TIME_FILTER_CHOICES, default='ALL')
+    time_filter = models.CharField(max_length=10, choices=TIME_FILTER_CHOICES, default='24H')  # Default to 24 hours
     location = models.CharField(max_length=10, choices=LOCATION_CHOICES, default='ALL')
     
     # Relationships

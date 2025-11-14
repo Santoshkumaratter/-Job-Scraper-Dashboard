@@ -4,6 +4,7 @@ Views for Dashboard App
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -114,10 +115,6 @@ class JobViewSet(viewsets.ReadOnlyModelViewSet):
         if portal:
             queryset = queryset.filter(source_job_portal_id=portal)
         
-        # Filter by exported status
-        is_exported = self.request.query_params.get('is_exported', None)
-        if is_exported is not None:
-            queryset = queryset.filter(is_exported_to_sheets=is_exported.lower() == 'true')
         
         return queryset
     
@@ -144,6 +141,8 @@ class JobViewSet(viewsets.ReadOnlyModelViewSet):
                 'company': job.company,
                 'company_url': job.company_url,
                 'company_size_display': job.get_company_size_display(),
+                'job_field': job.job_field,
+                'job_field_display': job.get_job_field_display(),
                 'job_link': job.job_link,
                 'posted_date': job.posted_date.strftime('%m/%d/%Y') if job.posted_date else '-',
                 'job_type': job.job_type or 'OTHER',
@@ -154,46 +153,43 @@ class JobViewSet(viewsets.ReadOnlyModelViewSet):
             })
         return Response(data)
 
-    @action(detail=False, methods=['post'])
-    def export_to_sheets(self, request):
-        """Export selected jobs to Google Sheets"""
-        job_ids = request.data.get('job_ids', [])
-        
-        # Get active sheet config
-        sheet_config = GoogleSheetConfig.objects.filter(is_active=True).first()
-        
-        if not sheet_config:
-            return Response(
-                {'error': 'No active Google Sheet configuration found'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if job_ids:
-            # Export specific jobs
-            task = export_to_sheets_task.delay(sheet_config.id, job_ids)
-            message = f'Exporting {len(job_ids)} jobs to Google Sheets'
-        else:
-            # Export all new jobs
-            task = export_to_sheets_task.delay(sheet_config.id)
-            message = 'Exporting all new jobs to Google Sheets'
-        
-        return Response({
-            'message': message,
-            'task_id': task.id
-        })
 
 
 # ============== Traditional Django Views ==============
 
 def dashboard_home(request):
-    """Main dashboard view"""
+    """Main dashboard view - Simplified single page"""
+    # Get latest jobs with portal information - show more than 10 with pagination
+    all_jobs = Job.objects.select_related('source_job_portal').order_by('-scraped_at')
+    
+    # Get per_page parameter, default to 20
+    per_page = request.GET.get('per_page', 20)
+    try:
+        per_page = int(per_page)
+        # Limit to reasonable values
+        if per_page not in [10, 20, 50, 100]:
+            per_page = 20
+    except (ValueError, TypeError):
+        per_page = 20
+    
+    # Paginate jobs
+    from django.core.paginator import Paginator
+    paginator = Paginator(all_jobs, per_page)
+    page_number = request.GET.get('page', 1)
+    page_obj = paginator.get_page(page_number)
+    
     context = {
         'total_keywords': Keyword.objects.filter(is_active=True).count(),
         'total_portals': JobPortal.objects.filter(is_active=True).count(),
         'total_filters': SavedFilter.objects.filter(is_active=True).count(),
         'total_jobs': Job.objects.count(),
         'recent_runs': ScraperRun.objects.all()[:5],
-        'recent_jobs': Job.objects.all()[:10],
+        'recent_jobs': page_obj,  # Paginated jobs
+        'page_obj': page_obj,     # Pagination object
+        'paginator': paginator,   # Paginator object
+        'technical_keywords': Keyword.objects.filter(category='TECHNICAL', is_active=True),
+        'non_technical_keywords': Keyword.objects.filter(category='NON_TECHNICAL', is_active=True),
+        'portals': JobPortal.objects.filter(is_active=True),
     }
     return render(request, 'dashboard/home.html', context)
 
@@ -243,30 +239,58 @@ def filters_page(request):
 def create_filter(request):
     """Create new filter"""
     if request.method == 'POST':
-        name = request.POST.get('name')
-        description = request.POST.get('description', '')
         job_type = request.POST.get('job_type', 'ALL')
-        time_filter = request.POST.get('time_filter', 'ALL')
+        time_filter = request.POST.get('time_filter', '24H')  # Default to 24H
         location = request.POST.get('location', 'ALL')
         keyword_ids = request.POST.getlist('keywords')
-        portal_ids = request.POST.getlist('portals')
         
-        if name:
-            saved_filter = SavedFilter.objects.create(
-                name=name,
-                description=description,
-                job_type=job_type,
-                time_filter=time_filter,
-                location=location
-            )
-            
-            if keyword_ids:
-                saved_filter.keywords.set(keyword_ids)
-            if portal_ids:
-                saved_filter.job_portals.set(portal_ids)
-            
-            messages.success(request, f'Filter "{name}" created successfully!')
-            return redirect('filters_page')
+        # Handle portal selection - check if "All Portals" is selected
+        portal_selection = request.POST.get('portal_selection', 'all')
+        if portal_selection == 'all':
+            portal_ids = []  # Empty means all portals
+        else:
+            portal_ids = request.POST.getlist('portals')
+        
+        # Validate that at least keywords are selected
+        if not keyword_ids:
+            messages.error(request, 'Please select at least one keyword.')
+            return redirect('dashboard_home')
+        
+        # Auto-generate filter name from keywords
+        from dashboard.models import Keyword
+        filter_name = 'New Filter'
+        if keyword_ids:
+            keywords_list = Keyword.objects.filter(id__in=keyword_ids).values_list('name', flat=True)
+            if keywords_list:
+                filter_name = ' | '.join(keywords_list[:3])  # First 3 keywords
+                if job_type != 'ALL':
+                    filter_name += f' ({job_type})'
+        
+        # Ensure unique name by appending number if needed
+        from django.utils.text import slugify
+        base_name = filter_name
+        counter = 1
+        while SavedFilter.objects.filter(name=filter_name).exists():
+            filter_name = f"{base_name} ({counter})"
+            counter += 1
+        
+        saved_filter = SavedFilter.objects.create(
+            name=filter_name,
+            description='',  # Description removed - not needed
+            job_type=job_type,
+            time_filter=time_filter,
+            location=location
+        )
+        
+        if keyword_ids:
+            saved_filter.keywords.set(keyword_ids)
+        # Only set portals if specific portals were selected (not "All Portals")
+        if portal_ids:
+            saved_filter.job_portals.set(portal_ids)
+        # If portal_ids is empty, it means "All Portals" - don't set any, scraper will use all
+        
+        messages.success(request, f'Filter "{filter_name}" created successfully!')
+        return redirect('dashboard_home')
     
     return redirect('filters_page')
 
@@ -336,12 +360,28 @@ def jobs_page(request):
     if market:
         jobs = jobs.filter(market=market)
     
+    job_field_filter = request.GET.get('field')
+    if job_field_filter:
+        jobs = jobs.filter(job_field=job_field_filter)
+    
     # Get total before pagination
     total_jobs = jobs.count()
     
-    # Pagination - 50 jobs per page
+    # Get jobs with related data for better performance
     jobs = jobs.select_related('source_job_portal')
-    paginator = Paginator(jobs, 50)  # 50 jobs per page
+    
+    # Get per_page parameter, default to 20
+    per_page = request.GET.get('per_page', 20)
+    try:
+        per_page = int(per_page)
+        # Limit to reasonable values
+        if per_page not in [10, 20, 50, 100]:
+            per_page = 20
+    except (ValueError, TypeError):
+        per_page = 20
+        
+    # Pagination with dynamic per_page value
+    paginator = Paginator(jobs, per_page)
     
     page_number = request.GET.get('page', 1)
     page_obj = paginator.get_page(page_number)
@@ -362,6 +402,8 @@ def jobs_page(request):
         'total_jobs': total_jobs,
         'page_obj': page_obj,
         'paginator': paginator,
+        'selected_market': market or '',
+        'selected_field': job_field_filter or '',
     }
     return render(request, 'dashboard/jobs.html', context)
 
@@ -371,14 +413,24 @@ def edit_filter(request, filter_id):
     saved_filter = get_object_or_404(SavedFilter, id=filter_id)
     
     if request.method == 'POST':
-        saved_filter.name = request.POST.get('name', saved_filter.name)
-        saved_filter.description = request.POST.get('description', saved_filter.description)
-        saved_filter.job_type = request.POST.get('job_type', saved_filter.job_type)
-        saved_filter.time_filter = request.POST.get('time_filter', saved_filter.time_filter)
-        saved_filter.location = request.POST.get('location', saved_filter.location)
-        
+        job_type = request.POST.get('job_type', saved_filter.job_type)
+        time_filter = request.POST.get('time_filter', saved_filter.time_filter)
+        location = request.POST.get('location', saved_filter.location)
         keyword_ids = request.POST.getlist('keywords')
         portal_ids = request.POST.getlist('portals')
+        
+        # Auto-update name from keywords if available
+        if keyword_ids:
+            keywords_list = Keyword.objects.filter(id__in=keyword_ids).values_list('name', flat=True)
+            if keywords_list:
+                filter_name = ' | '.join(keywords_list[:3])
+                if job_type != 'ALL':
+                    filter_name += f' ({job_type})'
+                saved_filter.name = filter_name
+        
+        saved_filter.job_type = job_type
+        saved_filter.time_filter = time_filter
+        saved_filter.location = location
         
         if keyword_ids:
             saved_filter.keywords.set(keyword_ids)
@@ -414,14 +466,14 @@ def delete_keyword(request, keyword_id):
 
 
 def export_jobs(request):
-    """Export jobs as CSV file (download)"""
-    from scraper.models import Job
+    """Export jobs as CSV file (download) with all required fields including decision makers"""
+    from scraper.models import Job, DecisionMaker
     import csv
     from django.http import HttpResponse
     from datetime import datetime
     
-    # Get all jobs
-    jobs = Job.objects.all().select_related('source_job_portal').order_by('-scraped_at')
+    # Get all jobs with decision makers
+    jobs = Job.objects.all().select_related('source_job_portal').prefetch_related('decision_makers').order_by('-scraped_at')
     
     if jobs.count() == 0:
         messages.warning(request, '⚠️ No jobs to export!')
@@ -433,37 +485,52 @@ def export_jobs(request):
     
     writer = csv.writer(response)
     
-    # Write header row
+    # Write header row with all required fields
     writer.writerow([
         'Sr. No.',
-        'Job Title',
+        'Job_Title',
         'Company',
-        'Company URL',
-        'Company Size',
-        'Market (USA/UK)',
+        'Company_URL',
+        'Company_Size',
+        'Market',
+        'Source_Job-Portal',
+        'Job_Link',
+        'Posted_Date',
         'Location',
-        'Job Type',
-        'Posted Date',
-        'Job Link',
-        'Job Portal',
-        'Scraped At'
+        'Salary',
+        'All Decision_Maker_Name',
+        'All Decision_Maker_Title',
+        'All Decision_Maker_LinkedIn',
+        'All Decision_Maker_Email'
     ])
     
     # Write job data
     for idx, job in enumerate(jobs, start=1):
+        # Get all decision makers for this job
+        decision_makers = job.decision_makers.all()
+        
+        # Combine all decision maker data
+        dm_names = ' | '.join([dm.name for dm in decision_makers if dm.name]) or '-'
+        dm_titles = ' | '.join([dm.title for dm in decision_makers if dm.title]) or '-'
+        dm_linkedin = ' | '.join([dm.linkedin_url for dm in decision_makers if dm.linkedin_url]) or '-'
+        dm_emails = ' | '.join([dm.email for dm in decision_makers if dm.email]) or '-'
+        
         writer.writerow([
             idx,
-            job.job_title,
-            job.company,
+            job.job_title or '-',
+            job.company or '-',
             job.company_url or '-',
-            job.get_company_size_display(),
-            job.market,
-            job.location or '-',
-            job.job_type or '-',
-            job.posted_date.strftime('%m/%d/%Y') if job.posted_date else '-',
-            job.job_link,
+            job.get_company_size_display() or '-',
+            job.market or '-',
             job.source_job_portal.name if job.source_job_portal else '-',
-            job.scraped_at.strftime('%Y-%m-%d %H:%M:%S') if job.scraped_at else '-'
+            job.job_link or '-',
+            job.posted_date.strftime('%Y-%m-%d') if job.posted_date else '-',
+            job.location or '-',
+            job.salary_range or '-',
+            dm_names,
+            dm_titles,
+            dm_linkedin,
+            dm_emails
         ])
     
     return response
@@ -540,3 +607,168 @@ def delete_all_jobs(request):
     )
     
     return redirect('jobs_page')
+
+
+@csrf_exempt
+def run_scraper_api(request):
+    """API endpoint to run scraper immediately with current configuration"""
+    from django.http import JsonResponse
+    import json
+    import traceback
+    from scraper.scraper_manager import ScraperManager
+    from django.utils import timezone
+    
+    if request.method != 'POST':
+        return JsonResponse({'status': 'error', 'error': 'POST method required'}, status=405)
+    
+    try:
+        print("\n" + "="*80)
+        print("🚀 RUN NOW button clicked - Starting scraper...")
+        print("="*80)
+        
+        data = json.loads(request.body)
+        print(f"📥 Received data: {data}")
+        
+        # Get keywords
+        keyword_ids = data.get('keywords', [])
+        print(f"📋 Keywords selected: {len(keyword_ids)}")
+        
+        if not keyword_ids:
+            print("❌ ERROR: No keywords selected")
+            return JsonResponse({'status': 'error', 'error': 'No keywords selected'}, status=400)
+        
+        keywords = Keyword.objects.filter(id__in=keyword_ids, is_active=True)
+        if not keywords.exists():
+            print("❌ ERROR: Invalid keywords")
+            return JsonResponse({'status': 'error', 'error': 'Invalid keywords'}, status=400)
+        
+        print(f"✅ Keywords found: {list(keywords.values_list('name', flat=True))}")
+        
+        # Get portals
+        portal_ids = data.get('portals', [])
+        if portal_ids:
+            portals = JobPortal.objects.filter(id__in=portal_ids, is_active=True)
+            print(f"🌐 Selected portals: {portals.count()}")
+        else:
+            # All portals
+            portals = JobPortal.objects.filter(is_active=True)
+            print(f"🌐 Using all portals: {portals.count()}")
+        
+        # Get filters
+        job_type = data.get('job_type', 'ALL')
+        time_filter = data.get('time_filter', '24H')
+        location = data.get('location', 'ALL')
+        
+        print(f"⚙️ Filters - Job Type: {job_type}, Time: {time_filter}, Location: {location}")
+        
+        # Create a temporary saved filter
+        timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S')
+        base_filter_name = f"Quick Run - {timestamp}"
+        filter_name = base_filter_name
+        counter = 1
+        while SavedFilter.objects.filter(name=filter_name).exists():
+            filter_name = f"{base_filter_name} ({counter})"
+            counter += 1
+        
+        print(f"💾 Creating filter: {filter_name}")
+        
+        saved_filter = SavedFilter.objects.create(
+            name=filter_name,
+            job_type=job_type,
+            time_filter=time_filter,
+            location=location
+        )
+        saved_filter.keywords.set(keywords)
+        if portals.exists():
+            saved_filter.job_portals.set(portals)
+        
+        print(f"✅ Filter created with ID: {saved_filter.id}")
+        
+        # Create scraper run
+        scraper_run = ScraperRun.objects.create(
+            saved_filter=saved_filter,
+            status='RUNNING',
+            started_at=timezone.now()
+        )
+        
+        print(f"✅ Scraper run created with ID: {scraper_run.id}")
+        
+        # Run scraper in background (async) via Celery
+        print("🔄 Attempting to start Celery task...")
+        
+        try:
+            from scraper.tasks import scrape_jobs_task
+            task = scrape_jobs_task.delay(saved_filter.id)
+            
+            print(f"✅ Celery task started successfully!")
+            print(f"📌 Task ID: {task.id}")
+            print("="*80 + "\n")
+            
+            return JsonResponse({
+                'status': 'success',
+                'message': 'Scraper started successfully',
+                'task_id': task.id,
+                'filter_id': saved_filter.id,
+                'run_id': scraper_run.id
+            })
+        except Exception as celery_error:
+            print("\n" + "="*80)
+            print("❌ CELERY ERROR DETECTED!")
+            print("="*80)
+            print(f"Error Type: {type(celery_error).__name__}")
+            print(f"Error Message: {str(celery_error)}")
+            print("\n📋 Full Traceback:")
+            print(traceback.format_exc())
+            print("="*80)
+            
+            # If Celery fails, run synchronously
+            print("\n⚠️ Celery not available - Running scraper SYNCHRONOUSLY...")
+            print("="*80 + "\n")
+            
+            from scraper.scraper_manager import ScraperManager
+            
+            try:
+                manager = ScraperManager(saved_filter, scraper_run)
+                result = manager.run()
+                
+                print("\n✅ Synchronous scraping completed!")
+                print(f"📊 Result: {result}")
+                print("="*80 + "\n")
+                
+                return JsonResponse({
+                    'status': 'success',
+                    'message': 'Scraper completed successfully (synchronous mode)',
+                    'filter_id': saved_filter.id,
+                    'run_id': scraper_run.id,
+                    'result': result
+                })
+            except Exception as sync_error:
+                print("\n" + "="*80)
+                print("❌ SYNCHRONOUS SCRAPING ERROR!")
+                print("="*80)
+                print(f"Error Type: {type(sync_error).__name__}")
+                print(f"Error Message: {str(sync_error)}")
+                print("\n📋 Full Traceback:")
+                print(traceback.format_exc())
+                print("="*80 + "\n")
+                
+                return JsonResponse({
+                    'status': 'error',
+                    'error': f'Scraping failed: {str(sync_error)}'
+                }, status=500)
+        
+    except Exception as e:
+        print("\n" + "="*80)
+        print("❌ CRITICAL ERROR in run_scraper_api!")
+        print("="*80)
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Message: {str(e)}")
+        print("\n📋 Full Traceback:")
+        print(traceback.format_exc())
+        print("="*80 + "\n")
+        
+        return JsonResponse({
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }, status=500)

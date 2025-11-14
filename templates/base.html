@@ -11,6 +11,9 @@
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
+    <!-- SweetAlert2 CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
+    
     <!-- Custom CSS -->
     <style>
         :root {
@@ -159,22 +162,26 @@
                 </div>
                 
                 <ul class="sidebar-menu mt-3">
-                    <li><a href="{% url 'dashboard_home' %}" class="{% if request.resolver_match.url_name == 'dashboard_home' %}active{% endif %}">
-                        <i class="fas fa-home"></i> Dashboard
+                    <li><a href="{% url 'dashboard_home' %}" class="{% if request.path == '/' %}active{% endif %}">
+                        <i class="fas fa-tachometer-alt"></i> Dashboard
                     </a></li>
-                    <li><a href="{% url 'keywords_page' %}" class="{% if request.resolver_match.url_name == 'keywords_page' %}active{% endif %}">
-                        <i class="fas fa-tags"></i> Keywords
-                    </a></li>
-                    <li><a href="{% url 'filters_page' %}" class="{% if request.resolver_match.url_name == 'filters_page' %}active{% endif %}">
-                        <i class="fas fa-filter"></i> Saved Filters
-                    </a></li>
-                    <li><a href="{% url 'jobs_page' %}" class="{% if request.resolver_match.url_name == 'jobs_page' %}active{% endif %}">
+                    <li><a href="{% url 'jobs_page' %}" class="{% if '/jobs/' in request.path %}active{% endif %}">
                         <i class="fas fa-briefcase"></i> Jobs
                     </a></li>
-                    <li><a href="/admin/" target="_blank">
-                        <i class="fas fa-cog"></i> Admin Panel
+                    <li><a href="{% url 'keywords_page' %}" class="{% if '/keywords/' in request.path %}active{% endif %}">
+                        <i class="fas fa-tags"></i> Keywords
+                    </a></li>
+                    <li><a href="{% url 'filters_page' %}" class="{% if '/filters/' in request.path %}active{% endif %}">
+                        <i class="fas fa-filter"></i> Saved Filters
                     </a></li>
                 </ul>
+                
+                <div style="padding: 1.5rem; margin-top: 2rem; background: rgba(255,255,255,0.1); border-radius: 10px;">
+                    <p style="font-size: 0.85rem; opacity: 0.9; margin: 0;">
+                        <i class="fas fa-info-circle"></i> Job Data Scraper
+                    </p>
+                    <small style="opacity: 0.7;">36 portals, real-time updates</small>
+                </div>
             </div>
             
             <!-- Main Content -->
@@ -199,6 +206,9 @@
     
     <!-- jQuery -->
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    
+    <!-- SweetAlert2 -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     
     {% block extra_js %}{% endblock %}
 </body>

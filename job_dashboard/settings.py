@@ -33,7 +33,6 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=lamb
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
@@ -49,7 +48,6 @@ INSTALLED_APPS = [
     # Local apps
     'dashboard',
     'scraper',
-    'google_sheets',
 ]
 
 MIDDLEWARE = [
@@ -170,13 +168,68 @@ SCRAPER_TIMEOUT = config('SCRAPER_TIMEOUT', default=30, cast=int)
 USE_PROXY = config('USE_PROXY', default=False, cast=bool)
 SCRAPER_RATE_LIMIT = config('SCRAPER_RATE_LIMIT', default='10/minute')
 
+# CRITICAL: Parallel scraping is DISABLED to prevent "cannot schedule new futures" errors
+# Sequential scraping is used instead, which is more reliable in Celery tasks
+USE_PARALLEL_SCRAPING = False  # Always False - parallel scraping completely disabled
+
 # Hunter.io API Key
 HUNTER_API_KEY = config('HUNTER_API_KEY', default='')
 
 # ScraperAPI key (optional proxy-as-a-service)
-SCRAPERAPI_KEY = config('SCRAPERAPI_KEY', default='debaaa9be6953d8c0b6f345266d95606')
+# Set SCRAPERAPI_KEY in environment variables or .env file
+SCRAPERAPI_KEY = config('SCRAPERAPI_KEY', default='')
 SCRAPERAPI_RENDER = config('SCRAPERAPI_RENDER', default=False, cast=bool)
 CLEARBIT_API_KEY = config('CLEARBIT_API_KEY', default='')
+
+# Logging Configuration - Enable DEBUG mode for detailed terminal logging
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+            'stream': 'ext://sys.stdout',
+        },
+        'file': {
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'scraper.log',
+            'formatter': 'verbose',
+            'encoding': 'utf-8',  # Support emojis in log file
+        },
+    },
+    'root': {
+        'handlers': ['console', 'file'],
+        'level': 'DEBUG' if DEBUG else 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'scraper': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'dashboard': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+    },
+}
 
 
 # ===== Scraper network settings =====

@@ -22,11 +22,19 @@ class Job(models.Model):
         ('UNKNOWN', 'Unknown'),
     ]
     
+    FIELD_CATEGORY_CHOICES = [
+        ('TECHNICAL', 'Technical'),
+        ('NON_TECHNICAL', 'Non-Technical'),
+        ('BOTH', 'Both'),
+        ('UNKNOWN', 'Unknown'),
+    ]
+    
     # Core job information
     job_title = models.CharField(max_length=500)
     company = models.CharField(max_length=500)
     company_url = models.URLField(max_length=1000, blank=True, null=True)
     company_size = models.CharField(max_length=20, choices=COMPANY_SIZE_CHOICES, default='UNKNOWN')
+    job_field = models.CharField(max_length=20, choices=FIELD_CATEGORY_CHOICES, default='UNKNOWN')
     market = models.CharField(max_length=10, choices=MARKET_CHOICES)
     
     # Job portal information
@@ -44,8 +52,6 @@ class Job(models.Model):
     
     # Scraper metadata
     scraper_run = models.ForeignKey(ScraperRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='jobs')
-    is_exported_to_sheets = models.BooleanField(default=False)
-    sheets_row_number = models.IntegerField(null=True, blank=True)
     
     # Timestamps
     scraped_at = models.DateTimeField(auto_now_add=True)

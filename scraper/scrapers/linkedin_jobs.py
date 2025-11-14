@@ -1,12 +1,21 @@
 """
 LinkedIn Jobs Scraper
 """
-from typing import List, Dict, Optional
-from ..utils.base_scraper import BaseScraper
-import urllib.parse
 import json
-import re
 import logging
+import re
+import time
+import urllib.parse
+from typing import Dict, List, Optional
+
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from ..utils.base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +40,13 @@ class LinkedInJobsScraper(BaseScraper):
         params = {
             'keywords': keyword,
             'location': self.location if self.location != 'ALL' else '',
-            'sortBy': 'DD'  # Date descending
+            'sortBy': 'DD'
         }
         
         if self.job_type == 'REMOTE':
-            params['f_WT'] = '2'  # Remote
+            params['f_WT'] = '2'
         elif self.job_type == 'HYBRID':
-            params['f_WT'] = '3'  # Hybrid
+            params['f_WT'] = '3'
         
         if self.time_filter == '24H':
             params['f_TPR'] = 'r86400'
@@ -52,49 +61,53 @@ class LinkedInJobsScraper(BaseScraper):
     def scrape_jobs(self) -> List[Dict]:
         """Scrape jobs from LinkedIn with detail enrichment"""
         jobs: List[Dict] = []
+        
+        logger.info(f"LinkedIn: Starting scrape for {len(self.keywords)} keyword(s)")
 
         for keyword in self.keywords:
             url = self.build_search_url(keyword)
             logger.info(f"LinkedIn: Fetching jobs for keyword '{keyword}' from {url}")
-            html = self.make_request(url, use_selenium=True)
+            
+            start_time = time.time()
+            html = self._fetch_linkedin_page_with_scrolling(url)
+            elapsed = time.time() - start_time
+            logger.info(f"LinkedIn: Page loaded with scrolling in {elapsed:.1f}s for '{keyword}'")
+            
             if not html:
                 logger.warning(f"LinkedIn: No HTML returned for keyword '{keyword}'")
                 continue
             
-            # Check if we got a login page - be more specific to avoid false positives
+            html_size = len(html) if html else 0
+            logger.info(f"LinkedIn: Got HTML of size {html_size} bytes for '{keyword}'")
+            
             html_lower = html.lower()
-            # Only treat as login page if we see specific login page indicators AND NO job-related content
             has_login_indicators = ('sign in' in html_lower or 'join linkedin' in html_lower or 'welcome to linkedin' in html_lower)
             has_job_content = ('base-card' in html_lower or 'jobs-search' in html_lower or '/jobs/view/' in html_lower or 'job-result' in html_lower)
             
             if has_login_indicators and not has_job_content:
                 logger.warning(f"LinkedIn: Got login/blocked page for keyword '{keyword}'. LinkedIn may require authentication.")
-                logger.info(f"LinkedIn: Still attempting to parse jobs in case there's some content...")
-                # Don't skip - try to find jobs anyway in case page has mixed content
-            elif has_job_content:
-                logger.info(f"LinkedIn: Found job content on page despite potential login indicators")
 
             soup = self.parse_html(html)
-            # LinkedIn uses multiple possible selectors for job cards
-            # Try each selector and combine results
+            logger.info(f"LinkedIn: Parsing HTML for '{keyword}'...")
+            
             job_cards = []
             selectors = [
-                soup.find_all('div', class_='base-card'),
-                soup.find_all('div', class_='job-search-card'),
-                soup.find_all('li', class_='jobs-search-results__list-item'),
-                soup.find_all('div', {'data-job-id': True}),
-                soup.select('div[data-job-id]'),
-                soup.select('li.jobs-search-results__list-item'),
-                soup.find_all('div', class_='job-result-card'),
-                soup.find_all('div', class_='result-card'),
+                ('base-card', soup.find_all('div', class_='base-card')),
+                ('job-search-card', soup.find_all('div', class_='job-search-card')),
+                ('jobs-search-results__list-item', soup.find_all('li', class_='jobs-search-results__list-item')),
+                ('data-job-id div', soup.find_all('div', {'data-job-id': True})),
+                ('data-job-id select', soup.select('div[data-job-id]')),
+                ('li.jobs-search-results__list-item', soup.select('li.jobs-search-results__list-item')),
+                ('job-result-card', soup.find_all('div', class_='job-result-card')),
+                ('result-card', soup.find_all('div', class_='result-card')),
             ]
             
-            for cards in selectors:
+            for selector_name, cards in selectors:
                 if cards:
+                    logger.info(f"LinkedIn: Found {len(cards)} cards using selector '{selector_name}'")
                     job_cards.extend(cards)
-                    break  # Use first working selector
+                    break
             
-            # Remove duplicates while preserving order
             seen_ids = set()
             unique_cards = []
             for card in job_cards:
@@ -103,21 +116,19 @@ class LinkedInJobsScraper(BaseScraper):
                     seen_ids.add(card_id)
                     unique_cards.append(card)
             job_cards = unique_cards
+            logger.info(f"LinkedIn: After deduplication, have {len(job_cards)} unique cards for '{keyword}'")
             
             if not job_cards:
-                # Try to find any job-related elements
                 logger.warning(f"LinkedIn: No job cards found with standard selectors for keyword '{keyword}'. Checking page content...")
                 
-                # Try alternative approach - look for links to job detail pages directly
                 job_links = soup.find_all('a', href=re.compile(r'/jobs/view/'))
                 if job_links:
                     logger.info(f"LinkedIn: Found {len(job_links)} job links directly. Extracting jobs from links...")
-                    # Create virtual cards from links
-                    for link in job_links[:50]:  # Limit to first 50 to avoid too many
+                    # NO LIMIT - fetch all jobs
+                    for link in job_links:
                         try:
                             href = link.get('href', '')
                             if href:
-                                # Create a minimal card-like structure from the link
                                 parent = link.find_parent(['div', 'li', 'article'])
                                 if parent:
                                     job_cards.append(parent)
@@ -125,17 +136,18 @@ class LinkedInJobsScraper(BaseScraper):
                             continue
                 
                 if not job_cards:
-                    # Log page structure for debugging
                     all_divs = soup.find_all('div', limit=20)
                     logger.debug(f"LinkedIn: Found {len(all_divs)} divs on page. First few classes: {[d.get('class') for d in all_divs[:5]]}")
-                    # Check for JSON-LD data
                     json_scripts = soup.find_all('script', type='application/ld+json')
                     if json_scripts:
                         logger.info(f"LinkedIn: Found {len(json_scripts)} JSON-LD scripts. May contain job data.")
             
+            logger.info(f"LinkedIn: Processing {len(job_cards)} job cards for '{keyword}'...")
+            processed = 0
+            skipped_no_title = 0
+            
             for card in job_cards:
                 try:
-                    # Try multiple selectors for title
                     title_elem = (
                         card.find('h3', class_='base-search-card__title') or
                         card.find('h3', class_='job-result-card__title') or
@@ -145,10 +157,13 @@ class LinkedInJobsScraper(BaseScraper):
                         card.select_one('h3, h2, a[href*="/jobs/view/"]')
                     )
                     if not title_elem:
+                        skipped_no_title += 1
                         continue
                     job_title = self.clean_text(title_elem.get_text())
+                    if not job_title:
+                        skipped_no_title += 1
+                        continue
 
-                    # Try multiple selectors for job link
                     link_elem = (
                         card.find('a', class_='base-card__full-link') or
                         card.find('a', class_='job-result-card__title-link') or
@@ -160,11 +175,9 @@ class LinkedInJobsScraper(BaseScraper):
                         job_link = link_elem.get('href', '')
                     if not job_link:
                         continue
-                    # Make sure it's a full URL
                     if job_link.startswith('/'):
                         job_link = urllib.parse.urljoin(self.base_url, job_link)
 
-                    # Try multiple selectors for company
                     company_elem = (
                         card.find('h4', class_='base-search-card__subtitle') or
                         card.find('h4', class_='job-result-card__subtitle-link') or
@@ -173,7 +186,6 @@ class LinkedInJobsScraper(BaseScraper):
                     )
                     company = self.clean_text(company_elem.get_text()) if company_elem else ''
 
-                    # Try multiple selectors for location
                     location_elem = (
                         card.find('span', class_='job-search-card__location') or
                         card.find('span', class_='job-result-card__location') or
@@ -184,31 +196,43 @@ class LinkedInJobsScraper(BaseScraper):
                     date_elem = card.find('time')
                     posted_date = self.parse_date(date_elem.get('datetime', '')) if date_elem else None
 
-                    # Enforce keyword filter strictly
-                    if not self.matches_keyword(job_title, keyword):
+                    keyword_match = False
+                    if self.keywords:
+                        keyword_match = any(
+                            self.matches_keyword(job_title, kw) 
+                            for kw in self.keywords
+                        )
+                    else:
+                        keyword_match = True
+                    
+                    if not keyword_match:
                         continue
 
-                    # Initialize variables
                     company_url = None
                     company_profile_url = None
                     
-                    # Extract LinkedIn company profile URL from card (not website URL)
                     if company_elem:
                         company_link = company_elem.find('a')
                         if company_link and company_link.has_attr('href'):
-                            href = company_link['href']
-                            # LinkedIn company profile URLs are like /company/perplexity or /company/...
+                            href = company_link.get('href', '')
                             if '/company/' in href:
                                 company_profile_url = urllib.parse.urljoin(self.base_url, href)
+                                logger.debug(f"LinkedIn: Extracted company profile URL from card: {company_profile_url}")
 
                     detail = self._fetch_job_detail(job_link)
                     description = detail.get('description', '')
 
                     if detail.get('company'):
                         company = detail['company']
-                    # Use company profile URL from detail if available, otherwise from card
                     if detail.get('company_profile_url'):
                         company_profile_url = detail['company_profile_url']
+                        logger.debug(f"LinkedIn: Found company profile URL from detail page: {company_profile_url}")
+                    
+                    if not company_profile_url and company:
+                        company_profile_url = self._build_linkedin_company_url(company)
+                        if company_profile_url:
+                            logger.info(f"LinkedIn: Built company profile URL from company name '{company}': {company_profile_url}")
+                    
                     if detail.get('company_url'):
                         company_url = detail['company_url']  # Website URL from profile
                     if detail.get('location'):
@@ -216,10 +240,6 @@ class LinkedInJobsScraper(BaseScraper):
                     if detail.get('posted_date'):
                         posted_date = detail['posted_date']
                     
-                    # Note: Company profile fetching moved to ScraperManager for better performance
-                    # This avoids fetching company profile for every job here (too slow)
-                    # ScraperManager will fetch company profile automatically if company_profile_url is set
-
                     detected_type = self.detect_job_type(job_title, location, description)
                     if detected_type == 'UNKNOWN':
                         mapped = self._map_employment_to_job_type(
@@ -234,9 +254,9 @@ class LinkedInJobsScraper(BaseScraper):
                     job_data = {
                         'job_title': job_title,
                         'company': company or detail.get('company', ''),
-                        'company_url': company_url,  # Will be enriched by ScraperManager from company profile
-                        'company_size': detail.get('company_size', 'UNKNOWN'),  # Will be enriched by ScraperManager from company profile
-                        'company_profile_url': company_profile_url,  # Pass to ScraperManager for enrichment
+                        'company_url': company_url,
+                        'company_size': detail.get('company_size', 'UNKNOWN'),
+                        'company_profile_url': company_profile_url,
                         'market': self._infer_market(location),
                         'job_link': job_link,
                         'posted_date': posted_date,
@@ -316,26 +336,23 @@ class LinkedInJobsScraper(BaseScraper):
                     detail['company'] = self.clean_text(name)
                 company_url = hiring.get('sameAs') or hiring.get('url')
                 if company_url:
-                    detail['company_url'] = company_url  # This might be website URL
+                    detail['company_url'] = company_url
             
-            # Extract company profile URL from job detail page using BaseScraper method
             company_profile_url = self._extract_company_profile_url(soup)
             if company_profile_url:
                 detail['company_profile_url'] = company_profile_url
+                logger.debug(f"LinkedIn: Extracted company profile URL from detail page: {company_profile_url}")
             
-            # Try to get company size from hiringOrganization (fallback)
             if isinstance(hiring, dict) and 'numberOfEmployees' in hiring:
                 employees = hiring.get('numberOfEmployees')
                 if isinstance(employees, (int, str)):
                     detail['company_size'] = self._parse_company_size_from_count(employees)
                 elif isinstance(employees, dict):
-                    # Schema.org Range format
                     min_val = employees.get('minValue')
                     max_val = employees.get('maxValue')
                     if min_val and max_val:
                         detail['company_size'] = self._parse_company_size_from_range(min_val, max_val)
 
-            # Extract company size from HTML if not in JSON-LD
             if 'company_size' not in detail:
                 company_size = self._extract_company_size_from_html(soup)
                 if company_size:
@@ -370,19 +387,16 @@ class LinkedInJobsScraper(BaseScraper):
         """Convert employee count to size category"""
         try:
             if isinstance(count, str):
-                # Remove commas and extract number
                 count = int(''.join(filter(str.isdigit, count)))
             else:
                 count = int(count)
             
-            if count >= 100000:
+            if count >= 10001:
                 return 'ENTERPRISE'
-            elif count >= 10000:
+            elif count >= 1001:
                 return 'LARGE'
-            elif count >= 1000:
+            elif count >= 51:
                 return 'MEDIUM'
-            elif count >= 50:
-                return 'SMALL'
             else:
                 return 'SMALL'
         except:
@@ -396,20 +410,16 @@ class LinkedInJobsScraper(BaseScraper):
             else:
                 min_val = int(min_val)
             
-            # Use max for categorization if available, otherwise min
             if isinstance(max_val, str):
                 max_val = int(''.join(filter(str.isdigit, max_val)))
             else:
                 max_val = int(max_val)
             
-            # Use average for better categorization
-            avg = (min_val + max_val) / 2
-            
-            if avg >= 100000:
+            if max_val >= 10001:
                 return 'ENTERPRISE'
-            elif avg >= 10000:
+            elif max_val >= 1001:
                 return 'LARGE'
-            elif avg >= 1000:
+            elif max_val >= 51:
                 return 'MEDIUM'
             else:
                 return 'SMALL'
@@ -423,47 +433,74 @@ class LinkedInJobsScraper(BaseScraper):
             return profile_data
         
         try:
+            logger.info(f"LinkedIn: Fetching company profile from {profile_url}")
             html = self.make_request(profile_url, use_selenium=True)
             if not html:
+                logger.warning(f"LinkedIn: No HTML returned from company profile URL")
                 return profile_data
             
             soup = self.parse_html(html)
+            logger.debug(f"LinkedIn: Parsed company profile HTML, looking for website URL and size")
             
-            # Extract company website URL from profile
-            # Look for website link in multiple locations
-            # LinkedIn shows website in "About us" section as external link
             website_selectors = [
                 'a[data-control-name="topcard_website"]',
-                'a[href^="http"]:not([href*="linkedin.com"])',
+                'a[data-tracking-control-name*="website"]',
                 '.org-top-card-summary-info-list__info-item a[href^="http"]',
                 'dd.org-top-card-summary-info-list__info-item a[href^="http"]',
+                '.top-card-layout__entity-info a[href^="http"]',
+                '.top-card-layout__first-subline a[href^="http"]',
                 'a[href*="website"]',
+                'a[href^="http"]:not([href*="linkedin.com"]):not([href*="redirect"])',
             ]
             
+            website_found = False
             for selector in website_selectors:
-                website_link = soup.select_one(selector)
-                if website_link:
-                    href = website_link.get('href', '')
-                    # Clean LinkedIn tracking URLs
-                    if 'linkedin.com/redirect' in href or '/redirect' in href:
-                        # Extract actual URL from redirect
-                        from urllib.parse import parse_qs, urlparse
-                        parsed = urlparse(href)
-                        params = parse_qs(parsed.query)
-                        if 'url' in params:
-                            href = params['url'][0]
-                    if href and href.startswith('http') and 'linkedin.com' not in href:
-                        profile_data['website_url'] = href
-                        logger.info(f"Found website URL from LinkedIn profile: {href}")
+                try:
+                    website_links = soup.select(selector)
+                    for website_link in website_links:
+                        href = website_link.get('href', '').strip()
+                        if not href:
+                            continue
+                        
+                        if 'linkedin.com/redirect' in href or '/redirect' in href or 'linkedin.com/voyager/api/redirect' in href:
+                            parsed = urllib.parse.urlparse(href)
+                            params = urllib.parse.parse_qs(parsed.query)
+                            
+                            redirect_url = None
+                            for param_name in ['url', 'redirectUrl', 'redirect', 'targetUrl']:
+                                if param_name in params:
+                                    redirect_url = params[param_name][0]
+                                    break
+                            
+                            if redirect_url:
+                                href = urllib.parse.unquote(redirect_url)
+                            elif parsed.fragment:
+                                href = urllib.parse.unquote(parsed.fragment)
+                        
+                        if href and href.startswith('http') and 'linkedin.com' not in href.lower():
+                            invalid_domains = [
+                                'linkedin.com', 'indeed.com', 'glassdoor.com', 'monster.com', 
+                                'jobs.', 'careers.', 'workable.com', 'greenhouse.io', 'lever.co',
+                                'ats.', 'apply.', 'recruiting.', 'talent.', 'hiring.'
+                            ]
+                            
+                            href_lower = href.lower()
+                            if not any(domain in href_lower for domain in invalid_domains):
+                                profile_data['website_url'] = href
+                                logger.info(f"LinkedIn: Found website URL from profile: {href}")
+                                website_found = True
+                                break
+                    
+                    if website_found:
                         break
+                except Exception as e:
+                    logger.debug(f"Error extracting website URL with selector {selector}: {e}")
+                    continue
             
-            # Extract company size from profile - multiple methods
-            # Method 1: Look in structured data (JSON-LD)
             for script in soup.find_all('script', type='application/ld+json'):
                 try:
                     data = json.loads(script.get_text(strip=True) or '{}')
                     if isinstance(data, dict):
-                        # Look for Organization type
                         if data.get('@type') == 'Organization':
                             employees = data.get('numberOfEmployees')
                             if employees:
@@ -481,32 +518,81 @@ class LinkedInJobsScraper(BaseScraper):
                 except:
                     continue
             
-            # Method 2: Extract from HTML text patterns
             if 'company_size' not in profile_data:
                 all_text = soup.get_text()
-                size_patterns = [
-                    r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
-                    r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
-                    r'view\s*all\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
-                    r'(\d{1,3}(?:,\d{3})*)\s*employees?',
+                
+                size_sections = [
+                    soup.select('.org-top-card-summary-info-list__info-item'),
+                    soup.select('.top-card-layout__entity-info'),
+                    soup.select('.about-us-section'),
+                    soup.select('[class*="company-size"]'),
                 ]
-            
-            for pattern in size_patterns:
-                match = re.search(pattern, all_text, re.IGNORECASE)
-                if match:
-                    if len(match.groups()) == 2:
-                        # Range format like "201-500 employees"
-                        min_val = int(match.group(1).replace(',', ''))
-                        max_val = int(match.group(2).replace(',', ''))
-                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                
+                size_found = False
+                for section_list in size_sections:
+                    for section in section_list:
+                        section_text = section.get_text()
+                        size_patterns = [
+                            r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                            r'(\d{1,3}(?:,\d{3})*)\+\s*employees?',
+                            r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)',
+                        ]
+                        
+                        for pattern in size_patterns:
+                            match = re.search(pattern, section_text, re.IGNORECASE)
+                            if match:
+                                try:
+                                    if len(match.groups()) == 2:
+                                        min_val = int(match.group(1).replace(',', ''))
+                                        max_val = int(match.group(2).replace(',', ''))
+                                        profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                                        logger.debug(f"LinkedIn: Found company size from HTML range: {min_val}-{max_val} → {profile_data['company_size']}")
+                                        size_found = True
+                                        break
+                                    else:
+                                        count = int(match.group(1).replace(',', ''))
+                                        profile_data['company_size'] = self._parse_company_size_from_count(count)
+                                        logger.debug(f"LinkedIn: Found company size from HTML count: {count}+ → {profile_data['company_size']}")
+                                        size_found = True
+                                        break
+                                except (ValueError, IndexError) as e:
+                                    logger.debug(f"Error parsing size pattern: {e}")
+                                    continue
+                        
+                        if size_found:
+                            break
+                    if size_found:
                         break
-                    else:
-                        # Single count like "1,831 employees"
-                        count = int(match.group(1).replace(',', ''))
-                        profile_data['company_size'] = self._parse_company_size_from_count(count)
-                        break
+                
+                if not size_found:
+                    size_patterns = [
+                        r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                        r'company\s*size[:\s]+(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                        r'(\d{1,3}(?:,\d{3})*)\+\s*employees?',
+                        r'(\d{1,3}(?:,\d{3})*)\s*employees?\s*on\s*linkedin',
+                        r'view\s*all\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
+                        r'(\d{1,3}(?:,\d{3})*)\s*employees?',
+                    ]
+                    
+                    for pattern in size_patterns:
+                        match = re.search(pattern, all_text, re.IGNORECASE)
+                        if match:
+                            try:
+                                if len(match.groups()) == 2:
+                                    min_val = int(match.group(1).replace(',', ''))
+                                    max_val = int(match.group(2).replace(',', ''))
+                                    profile_data['company_size'] = self._parse_company_size_from_range(min_val, max_val)
+                                    logger.debug(f"LinkedIn: Found company size from HTML: {min_val}-{max_val} → {profile_data['company_size']}")
+                                    break
+                                else:
+                                    count = int(match.group(1).replace(',', ''))
+                                    profile_data['company_size'] = self._parse_company_size_from_count(count)
+                                    logger.debug(f"LinkedIn: Found company size from HTML: {count} → {profile_data['company_size']}")
+                                    break
+                            except (ValueError, IndexError) as e:
+                                logger.debug(f"Error parsing size pattern: {e}")
+                                continue
             
-            # Extract company name from profile
             company_name_elem = soup.find('h1', class_='text-heading-xlarge')
             if not company_name_elem:
                 company_name_elem = soup.find('h1')
@@ -523,11 +609,7 @@ class LinkedInJobsScraper(BaseScraper):
     def _extract_company_size_from_html(self, soup) -> Optional[str]:
         """Extract company size from LinkedIn HTML"""
         try:
-            # LinkedIn shows company size in various formats
-            # Pattern 1: "11-50 employees" or "201-500 employees"
             text = soup.get_text()
-            
-            # Look for employee count patterns
             patterns = [
                 r'(\d{1,3}(?:,\d{3})*)\s*-\s*(\d{1,3}(?:,\d{3})*)\s*employees?',
                 r'(\d{1,3}(?:,\d{3})*)\+?\s*employees?',
@@ -538,16 +620,13 @@ class LinkedInJobsScraper(BaseScraper):
                 match = re.search(pattern, text, re.IGNORECASE)
                 if match:
                     if len(match.groups()) == 2:
-                        # Range format
                         min_val = int(match.group(1).replace(',', ''))
                         max_val = int(match.group(2).replace(',', ''))
                         return self._parse_company_size_from_range(min_val, max_val)
                     else:
-                        # Single count
                         count = int(match.group(1).replace(',', ''))
                         return self._parse_company_size_from_count(count)
             
-            # Try to find in specific LinkedIn elements
             size_elem = soup.find('span', class_=re.compile('company-size|employees', re.I))
             if size_elem:
                 size_text = size_elem.get_text()
@@ -559,7 +638,113 @@ class LinkedInJobsScraper(BaseScraper):
             logger.debug(f"Error extracting company size from HTML: {e}")
         
         return None
-
+    
+    def _build_linkedin_company_url(self, company_name: str) -> Optional[str]:
+        """Build LinkedIn company profile URL from company name"""
+        if not company_name:
+            return None
+        
+        try:
+            cleaned = re.sub(r'[^\w\s-]', '', company_name)
+            slug = re.sub(r'\s+', '-', cleaned.lower().strip())
+            slug = re.sub(r'-+', '-', slug)
+            slug = slug.strip('-')
+            
+            if not slug:
+                return None
+            
+            company_url = f"{self.base_url}/company/{slug}/"
+            logger.debug(f"Built LinkedIn company URL: {company_url} from company name: '{company_name}'")
+            return company_url
+        except Exception as e:
+            logger.debug(f"Error building LinkedIn company URL for '{company_name}': {e}")
+            return None
+    
+    def _fetch_linkedin_page_with_scrolling(self, url: str) -> Optional[str]:
+        """Fetch LinkedIn page with multiple scrolls to load maximum jobs"""
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.set_page_load_timeout(30)
+            driver.get(url)
+            time.sleep(2)
+            
+            max_scrolls = 50  # Increased to get maximum jobs
+            scroll_pause = 1.5  # Slightly longer pause to ensure content loads
+            
+            last_height = 0
+            no_change_count = 0
+            max_no_change = 5  # Increased tolerance before stopping
+            
+            for scroll_num in range(max_scrolls):
+                # Scroll to bottom
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                if scroll_num % 10 == 0:
+                    logger.info(f"LinkedIn: Scroll {scroll_num + 1}/{max_scrolls}")
+                time.sleep(scroll_pause)
+                
+                # Check if page height changed
+                current_height = driver.execute_script("return document.body.scrollHeight")
+                if current_height == last_height:
+                    no_change_count += 1
+                    if no_change_count >= max_no_change:
+                        logger.info(f"LinkedIn: No new content after {no_change_count} scrolls, stopping early")
+                        break
+                else:
+                    no_change_count = 0
+                    last_height = current_height
+                
+                # Try to click "Show more" buttons more frequently
+                if scroll_num % 3 == 0:  # Check every 3 scrolls instead of 5
+                    try:
+                        # Try multiple selectors for "Show more" / "See more" buttons
+                        show_more_selectors = [
+                            'button[aria-label*="Show more"]',
+                            'button[aria-label*="see more"]',
+                            'button[aria-label*="See more"]',
+                            '.jobs-search-results__pagination button',
+                            'button[data-tracking-control-name*="show more"]',
+                            'button.jobs-search-results__pagination-button',
+                            'button[aria-label*="Load more"]',
+                        ]
+                        for selector in show_more_selectors:
+                            try:
+                                show_more_button = driver.find_element(By.CSS_SELECTOR, selector)
+                                if show_more_button and show_more_button.is_displayed():
+                                    driver.execute_script("arguments[0].click();", show_more_button)
+                                    logger.debug(f"LinkedIn: Clicked 'Show more' button (selector: {selector})")
+                                    time.sleep(2)  # Wait longer after clicking
+                                    break
+                            except:
+                                continue
+                    except:
+                        pass
+            
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+            
+            html = driver.page_source
+            driver.quit()
+            
+            logger.info(f"LinkedIn: Scrolled {max_scrolls} times, page size: {len(html)} bytes")
+            return html
+            
+        except Exception as e:
+            logger.error(f"LinkedIn: Error fetching page with scrolling: {e}")
+            if 'driver' in locals():
+                try:
+                    driver.quit()
+                except:
+                    pass
+            return self.make_request(url, use_selenium=True)
+    
     def _map_employment_to_job_type(self, employment: Optional[str], workplace: Optional[str]) -> Optional[str]:
         employment_upper = (employment or '').upper()
         workplace_upper = (workplace or '').upper()

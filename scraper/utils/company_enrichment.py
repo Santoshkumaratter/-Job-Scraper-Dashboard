@@ -22,14 +22,16 @@ class CompanyEnrichment:
     
     def get_company_size(self, company_name: str, company_url: Optional[str] = None) -> str:
         """
-        Determine company size using REAL data sources only (no hardcoded values)
+        Determine company size using multiple data sources
         
         Methods used (in order):
-        1. Scrape from company website (real employee count from website)
-        2. Clearbit API (if API key available - real employee metrics)
+        1. Cached company info (from previous enrichments)
+        2. Scrape from company website (real employee count from website)
+        3. Clearbit API (if API key available - real employee metrics)
+        4. Common companies lookup (for popular companies)
         
         Returns:
-            Company size (SMALL, MEDIUM, LARGE, ENTERPRISE) or UNKNOWN if no real data found
+            Company size (SMALL, MEDIUM, LARGE, ENTERPRISE) or UNKNOWN if no data found
         """
         if not company_name:
             return 'UNKNOWN'
@@ -57,20 +59,44 @@ class CompanyEnrichment:
             if size:
                 logger.info(f"Found company size for {company_name} via Clearbit: {size}")
                 return size
+                
+        # Method 3: Check common companies (for well-known ones)
+        common_size = self._get_common_company_size(company_name)
+        if common_size:
+            logger.info(f"Found company size for {company_name} via common companies table: {common_size}")
+            return common_size
+            
+        # Method 4: Estimate size from domain popularity (best effort)
+        if domain_for_size:
+            estimated_size = self._estimate_size_from_domain(domain_for_size)
+            if estimated_size:
+                logger.info(f"Estimated company size for {company_name} via domain: {estimated_size}")
+                return estimated_size
 
-        # No real data found - return UNKNOWN
-        logger.debug(f"No real company size data found for {company_name}; returning UNKNOWN")
+        # No data found - return UNKNOWN
+        logger.debug(f"No company size data found for {company_name}; returning UNKNOWN")
         return 'UNKNOWN'
     
     def _scrape_from_website(self, company_url: str) -> str:
-        """Try to scrape company size from website"""
+        """Try to scrape company size from website with optimized performance"""
         try:
-            response = requests.get(company_url, timeout=3, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+                # Use a shorter timeout and don't download large pages
+            response = requests.get(
+                company_url, 
+                timeout=5,  # Increased timeout for better success rate 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'},
+                stream=True  # Use streaming to avoid downloading huge pages
+            )
             
             if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'lxml')
+                # Only read first 50KB of the page to improve performance
+                content = ''
+                for chunk in response.iter_content(chunk_size=1024):
+                    content += chunk.decode('utf-8', errors='ignore')
+                    if len(content) > 50000:  # Stop after 50KB
+                        break
+                        
+                soup = BeautifulSoup(content, 'lxml')
                 text = soup.get_text().lower()
                 
                 # Look for employee count mentions - multiple patterns
@@ -151,7 +177,8 @@ class CompanyEnrichment:
             resp = requests.get(
                 'https://autocomplete.clearbit.com/v1/companies/suggest',
                 params={'query': company_name},
-                timeout=2,  # Faster timeout
+                timeout=5,  # Increased timeout for better reliability
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             )
             resp.raise_for_status()
             suggestions = resp.json()
@@ -275,28 +302,40 @@ class CompanyEnrichment:
         return matches
     
     def _verify_domain_by_content(self, domain: str, company_name: str, company_words: list) -> bool:
-        """Verify domain by checking if company name appears in website content"""
+        """Verify domain by checking if company name appears in website content (optimized)"""
         try:
-            resp = requests.get(f'https://{domain}', timeout=3, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
+            # Use shorter timeout and stream the response to avoid downloading entire page
+            resp = requests.get(
+                f'https://{domain}', 
+                timeout=2, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                stream=True
+            )
+            
             if resp.status_code == 200:
+                # Only read first part of the page (30KB max)
+                content = ''
+                for chunk in resp.iter_content(chunk_size=1024):
+                    content += chunk.decode('utf-8', errors='ignore')
+                    if len(content) > 30000:  # Limit to first 30KB for speed
+                        break
+                        
                 from bs4 import BeautifulSoup
-                soup = BeautifulSoup(resp.text, 'lxml')
+                soup = BeautifulSoup(content, 'lxml')
                 
-                # Check page title
+                # Check page title (most important)
                 title = soup.find('title')
                 title_text = title.get_text().lower() if title else ''
                 
-                # Check page content (first 5000 chars to avoid false matches)
-                body = soup.find('body')
-                body_text = body.get_text().lower()[:5000] if body else ''
-                
-                # Check meta description
+                # Check meta description (also important and small)
                 meta_desc = soup.find('meta', {'name': 'description'})
                 meta_text = meta_desc.get('content', '').lower() if meta_desc else ''
                 
-                # Combine text for checking
+                # Only get first 3000 chars of body to improve performance
+                body = soup.find('body')
+                body_text = body.get_text().lower()[:3000] if body else ''
+                
+                # Combine text for checking (prioritize title and meta)
                 all_text = f"{title_text} {meta_text} {body_text}"
                 
                 company_lower = company_name.lower()
@@ -319,25 +358,30 @@ class CompanyEnrichment:
             return False
     
     def _guess_domain(self, company_name: str) -> Optional[str]:
-        """Try common domain patterns based on company name"""
+        """Try common domain patterns based on company name (optimized for speed)"""
         if not company_name:
             return None
         
+        # Use cached results to avoid repeated lookups
+        cache_key = company_name.lower().strip()
+        if cache_key in self._domain_cache:
+            return self._domain_cache[cache_key]
+            
         # Clean company name
         cleaned = re.sub(r'[^\w\s]', '', company_name.lower())
         words = cleaned.split()
         
-        # Try different patterns
+        # Try different patterns (most likely first)
         candidates = []
         
-        # Pattern 1: Full company name (alphanumeric only)
+        # Pattern 1: First word only (most common pattern for companies)
+        if words and len(words[0]) >= 3:
+            candidates.append(words[0])
+        
+        # Pattern 2: Full company name (alphanumeric only)
         token = ''.join(ch for ch in cleaned if ch.isalnum())
         if len(token) >= 3:
             candidates.append(token)
-        
-        # Pattern 2: First word only
-        if words and len(words[0]) >= 3:
-            candidates.append(words[0])
         
         # Pattern 3: First letter of each word (acronym)
         if len(words) > 1:
@@ -345,20 +389,40 @@ class CompanyEnrichment:
             if len(acronym) >= 2:
                 candidates.append(acronym)
         
-        # Try candidates with common TLDs
-        tlds = ['.com', '.io', '.co', '.ai', '.net', '.org']
-        for candidate in candidates[:3]:  # Limit to avoid too many requests
-            for tld in tlds:
-                domain = f"{candidate}{tld}"
-                try:
-                    resp = requests.head(f"https://{domain}", timeout=2, allow_redirects=True)
-                    if resp.status_code < 400:
-                        # Verify domain actually belongs to company
+        # Try most common TLDs first (.com is by far the most likely)
+        most_common_tlds = ['.com']  # Start with the most common TLD
+        other_tlds = ['.io', '.co', '.ai', '.net', '.org']
+        
+        # First try all candidates with .com (much more likely to succeed)
+        for candidate in candidates[:2]:  # Limit to top 2 candidates for speed
+            domain = f"{candidate}{most_common_tlds[0]}"
+            try:
+                # Use fast HEAD request with short timeout
+                resp = requests.head(f"https://{domain}", timeout=1.5, allow_redirects=True)
+                if resp.status_code < 400:
+                    # Found a likely domain - cache it even before verification
+                    self._domain_cache[cache_key] = domain
+                    # Try to verify (but return domain even if verification times out)
+                    try:
                         if self._verify_company_domain(domain, company_name):
                             logger.info(f"Guessed and verified domain for {company_name}: {domain}")
                             return domain
-                        else:
-                            logger.debug(f"Guessed domain {domain} exists but doesn't match {company_name}")
+                    except:
+                        # If verification fails/times out, still return the domain as best guess
+                        return domain
+            except Exception:
+                pass
+                
+        # If .com didn't work, try other TLDs but limit to first candidate only
+        if len(candidates) > 0:
+            for tld in other_tlds:
+                domain = f"{candidates[0]}{tld}"
+                try:
+                    resp = requests.head(f"https://{domain}", timeout=1.5, allow_redirects=True)
+                    if resp.status_code < 400:
+                        # Cache result
+                        self._domain_cache[cache_key] = domain
+                        return domain
                 except Exception:
                     continue
         
@@ -436,4 +500,117 @@ class CompanyEnrichment:
             return domain or None
         except Exception:
             return None
+            
+    def _get_common_company_size(self, company_name: str) -> Optional[str]:
+        """Get company size for well-known companies from a common lookup table"""
+        if not company_name:
+            return None
+            
+        # Normalize company name for comparison
+        normalized_name = company_name.lower().strip()
+        
+        # Dictionary of common companies and their sizes
+        common_companies = {
+            # Large tech companies (ENTERPRISE: 1000+)
+            'google': 'ENTERPRISE',
+            'alphabet': 'ENTERPRISE',
+            'microsoft': 'ENTERPRISE',
+            'amazon': 'ENTERPRISE',
+            'aws': 'ENTERPRISE',
+            'apple': 'ENTERPRISE',
+            'meta': 'ENTERPRISE',
+            'facebook': 'ENTERPRISE',
+            'netflix': 'ENTERPRISE',
+            'ibm': 'ENTERPRISE',
+            'oracle': 'ENTERPRISE',
+            'salesforce': 'ENTERPRISE',
+            'intel': 'ENTERPRISE',
+            'cisco': 'ENTERPRISE',
+            'dell': 'ENTERPRISE',
+            'adobe': 'ENTERPRISE',
+            'hp': 'ENTERPRISE',
+            'hewlett packard': 'ENTERPRISE',
+            'twitter': 'ENTERPRISE',
+            'x corp': 'ENTERPRISE',
+            'uber': 'ENTERPRISE',
+            'airbnb': 'ENTERPRISE',
+            'paypal': 'ENTERPRISE',
+            'tesla': 'ENTERPRISE',
+            'nvidia': 'ENTERPRISE',
+            'linkedin': 'ENTERPRISE',
+            'indeed': 'ENTERPRISE',
+            'glassdoor': 'ENTERPRISE',
+            'ziprecruiter': 'ENTERPRISE',
+            'monster': 'ENTERPRISE',
+            'dice': 'ENTERPRISE',
+            'careerbuilder': 'ENTERPRISE',
+            'workday': 'ENTERPRISE',
+            'sap': 'ENTERPRISE',
+            'accenture': 'ENTERPRISE',
+            'deloitte': 'ENTERPRISE',
+            'pwc': 'ENTERPRISE',
+            'kpmg': 'ENTERPRISE',
+            'ey': 'ENTERPRISE',
+            
+            # Medium-sized tech companies (LARGE: 251-1000)
+            'slack': 'LARGE',
+            'zoom': 'LARGE',
+            'gitlab': 'LARGE',
+            'datadog': 'LARGE',
+            'shopify': 'LARGE',
+            'atlassian': 'LARGE',
+            'twilio': 'LARGE',
+            'square': 'LARGE',
+            'block': 'LARGE',
+            'cloudflare': 'LARGE',
+            'digitalocean': 'LARGE',
+            'lensa': 'LARGE',
+            'pioneer square labs': 'LARGE',
+            'iftt': 'LARGE',
+            'andiamo': 'LARGE',
+            'profocus technology': 'LARGE',
+            'hydrozn': 'LARGE',
+            'casera': 'LARGE',
+            
+            # Smaller tech companies (MEDIUM: 51-250)
+            'vercel': 'MEDIUM',
+            'deno': 'MEDIUM',
+            'supabase': 'MEDIUM',
+            'posthog': 'MEDIUM',
+            'retool': 'MEDIUM',
+            'replicate': 'MEDIUM',
+            'replit': 'MEDIUM',
+            
+            # Startups (SMALL: 1-50)
+            'startupcompany': 'SMALL'
+        }
+        
+        # Check for exact match
+        if normalized_name in common_companies:
+            return common_companies[normalized_name]
+            
+        # Check for partial matches with popular companies
+        for company, size in common_companies.items():
+            if company in normalized_name or normalized_name in company:
+                return size
+                
+        return None
+        
+    def _estimate_size_from_domain(self, domain: str) -> Optional[str]:
+        """Attempt to estimate company size based on domain presence"""
+        try:
+            # Check domain TLD - enterprise companies often have .com domains
+            if domain.endswith('.com') and len(domain.split('.')[0]) <= 6:
+                # Short .com domains are often established companies
+                return 'LARGE'
+            elif domain.endswith('.io') or domain.endswith('.ai') or domain.endswith('.co'):
+                # Modern tech domains are often startups or medium size companies
+                return 'MEDIUM'
+            elif domain.endswith('.org') or domain.endswith('.edu') or domain.endswith('.gov'):
+                # Non-profit, educational or government orgs can vary widely
+                return 'MEDIUM'  # Default assumption for these entities
+        except Exception:
+            pass
+            
+        return None
 

@@ -3,154 +3,486 @@
 {% block title %}Dashboard - Job Data Scraper{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1><i class="fas fa-chart-line"></i> Dashboard Overview</h1>
-    <p class="text-muted">Monitor your job scraping activities</p>
+<div class="page-header text-center">
+    <h1><i class="fas fa-robot"></i> Job Scraper Dashboard</h1>
+    <p class="text-muted fs-5">Simple & Easy - Configure, Run, Download</p>
 </div>
 
-<!-- Statistics Cards -->
-<div class="row">
-    <div class="col-md-3">
-        <div class="card stat-card">
-            <i class="fas fa-tags fa-2x text-primary mb-2"></i>
-            <h3>{{ total_keywords }}</h3>
-            <p>Active Keywords</p>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stat-card">
-            <i class="fas fa-globe fa-2x text-info mb-2"></i>
-            <h3>{{ total_portals }}</h3>
-            <p>Job Portals</p>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stat-card">
-            <i class="fas fa-filter fa-2x text-success mb-2"></i>
-            <h3>{{ total_filters }}</h3>
-            <p>Saved Filters</p>
-        </div>
-    </div>
-    <div class="col-md-3">
-        <div class="card stat-card">
-            <i class="fas fa-briefcase fa-2x text-warning mb-2"></i>
-            <h3>{{ total_jobs }}</h3>
-            <p>Total Jobs Scraped</p>
-        </div>
-    </div>
-</div>
-
-<!-- Recent Scraper Runs -->
+<!-- Main Configuration Card -->
 <div class="card">
     <div class="card-header">
-        <h5 class="mb-0"><i class="fas fa-history"></i> Recent Scraper Runs</h5>
+        <h5 class="mb-0"><i class="fas fa-cog"></i> Scraper Configuration</h5>
     </div>
     <div class="card-body">
-        <div class="table-responsive">
-            <table class="table table-hover">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Filter</th>
-                        <th>Status</th>
-                        <th>Jobs Scraped</th>
-                        <th>Started At</th>
-                        <th>Duration (sec)</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for run in recent_runs %}
-                    <tr>
-                        <td>#{{ run.id }}</td>
-                        <td>{{ run.saved_filter.name }}</td>
-                        <td>
-                            {% if run.status == 'COMPLETED' %}
-                                <span class="badge bg-success">{{ run.status }}</span>
-                            {% elif run.status == 'RUNNING' %}
-                                <span class="badge bg-primary">{{ run.status }}</span>
-                            {% elif run.status == 'FAILED' %}
-                                <span class="badge bg-danger">{{ run.status }}</span>
-                            {% else %}
-                                <span class="badge bg-secondary">{{ run.status }}</span>
-                            {% endif %}
-                        </td>
-                        <td>{{ run.total_jobs_scraped }}</td>
-                        <td>{{ run.started_at|date:"Y-m-d H:i" }}</td>
-                        <td>{{ run.duration_seconds|default:"-" }}</td>
-                        <td>
-                            <button class="btn btn-sm btn-outline-danger" onclick="deleteScraperRun({{ run.id }}, '#{{ run.id }}')">
-                                <i class="fas fa-trash"></i> Delete
-                            </button>
-                        </td>
-                    </tr>
-                    {% empty %}
-                    <tr>
-                        <td colspan="7" class="text-center text-muted">No scraper runs yet</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        <form id="scraperForm" method="post" action="{% url 'create_filter' %}">
+            {% csrf_token %}
+            
+            <!-- Keyword Selection -->
+            <div class="mb-4">
+                <label class="form-label fw-bold"><i class="fas fa-tags"></i> Keyword Selection</label>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card border-primary">
+                            <div class="card-header bg-primary text-white">
+                                <strong>Technical Keywords</strong>
+                            </div>
+                            <div class="card-body" style="max-height: 250px; overflow-y: auto;">
+                                {% for keyword in technical_keywords %}
+                                <div class="form-check">
+                                    <input class="form-check-input keyword-checkbox" type="checkbox" name="keywords" value="{{ keyword.id }}" id="tech-kw{{ keyword.id }}">
+                                    <label class="form-check-label" for="tech-kw{{ keyword.id }}">
+                                        {{ keyword.name }}
+                                    </label>
+                                </div>
+                                {% empty %}
+                                <p class="text-muted">No technical keywords available. Run: python manage.py setup_portals</p>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="card border-success">
+                            <div class="card-header bg-success text-white">
+                                <strong>Non-Technical Keywords</strong>
+                            </div>
+                            <div class="card-body" style="max-height: 250px; overflow-y: auto;">
+                                {% for keyword in non_technical_keywords %}
+                                <div class="form-check">
+                                    <input class="form-check-input keyword-checkbox" type="checkbox" name="keywords" value="{{ keyword.id }}" id="nontech-kw{{ keyword.id }}">
+                                    <label class="form-check-label" for="nontech-kw{{ keyword.id }}">
+                                        {{ keyword.name }}
+                                    </label>
+                                </div>
+                                {% empty %}
+                                <p class="text-muted">No non-technical keywords available. Run: python manage.py setup_portals</p>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Portal Selection -->
+            <div class="mb-4">
+                <label class="form-label fw-bold"><i class="fas fa-globe"></i> Portal Selection</label>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="portal_selection" id="allPortals" value="all" checked>
+                    <label class="form-check-label fw-bold text-primary" for="allPortals">
+                        All Job Portals (36 portals)
+                    </label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="portal_selection" id="singlePortal" value="single">
+                    <label class="form-check-label" for="singlePortal">
+                        Single Portal
+                    </label>
+                </div>
+                <div id="singlePortalSelect" style="display: none; margin-left: 30px;">
+                    <select class="form-select" name="portals" id="portalSelect">
+                        {% for portal in portals %}
+                        <option value="{{ portal.id }}">{{ portal.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <label class="form-label fw-bold"><i class="fas fa-clock"></i> Time Filter</label>
+                    <select class="form-select" name="time_filter" id="timeFilter">
+                        <option value="ALL" selected>All Time (Recommended)</option>
+                        <option value="24H">Last 24 Hours</option>
+                        <option value="3D">Last 3 Days</option>
+                        <option value="7D">Last 7 Days</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-bold"><i class="fas fa-briefcase"></i> Job Type</label>
+                    <select class="form-select" name="job_type" id="jobType">
+                        <option value="ALL" selected>All</option>
+                        <option value="REMOTE">Remote</option>
+                        <option value="FULL_TIME">Full-time</option>
+                        <option value="HYBRID">Hybrid</option>
+                        <option value="FREELANCE">Freelance</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label fw-bold"><i class="fas fa-map-marker-alt"></i> Location</label>
+                    <select class="form-select" name="location" id="location">
+                        <option value="ALL" selected>All</option>
+                        <option value="USA">USA</option>
+                        <option value="UK">UK</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Action Buttons - Simplified (Only Run Now & Download) -->
+            <div class="d-flex gap-2">
+                <button type="button" class="btn btn-success btn-lg" id="runNowBtn">
+                    <i class="fas fa-play"></i> Run Now
+                </button>
+                <a href="{% url 'export_jobs' %}" class="btn btn-info btn-lg">
+                    <i class="fas fa-download"></i> Download CSV
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Statistics Cards - Simplified -->
+<div class="row mt-4">
+    <div class="col-md-4">
+        <div class="card stat-card bg-light">
+            <i class="fas fa-tags fa-3x text-primary mb-3"></i>
+            <h2>{{ total_keywords }}</h2>
+            <p class="fw-bold">Keywords Available</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card stat-card bg-light">
+            <i class="fas fa-globe fa-3x text-info mb-3"></i>
+            <h2>{{ total_portals }}</h2>
+            <p class="fw-bold">Job Portals Active</p>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card stat-card bg-light">
+            <i class="fas fa-briefcase fa-3x text-success mb-3"></i>
+            <h2>{{ total_jobs }}</h2>
+            <p class="fw-bold">Jobs Scraped</p>
         </div>
     </div>
 </div>
 
-<!-- Recent Jobs -->
-<div class="card">
-    <div class="card-header">
-        <h5 class="mb-0"><i class="fas fa-clock"></i> Recently Scraped Jobs</h5>
+<!-- Scraped Jobs Display -->
+<div class="card mt-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0"><i class="fas fa-briefcase"></i> Scraped Jobs ({{ total_jobs }} total)</h5>
+        <div>
+            <a href="{% url 'export_jobs' %}" class="btn btn-sm btn-success me-2">
+                <i class="fas fa-download"></i> Download All as CSV
+            </a>
+            <button onclick="deleteAllJobs()" class="btn btn-sm btn-danger">
+                <i class="fas fa-trash-alt"></i> Delete All Jobs
+            </button>
+        </div>
     </div>
     <div class="card-body">
+        {% if recent_jobs %}
         <div class="table-responsive">
-            <table class="table table-hover">
-                <thead>
+            <table class="table table-hover table-striped">
+                <thead class="table-light">
                     <tr>
+                        <th>Sr.</th>
                         <th>Job Title</th>
                         <th>Company</th>
                         <th>Location</th>
-                        <th>Market</th>
-                        <th>Source</th>
-                        <th>Scraped At</th>
+                        <th>Portal</th>
+                        <th>Posted</th>
+                        <th>Job Link</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for job in recent_jobs %}
                     <tr>
-                        <td><strong>{{ job.job_title }}</strong></td>
-                        <td>{{ job.company }}</td>
-                        <td>{{ job.location }}</td>
-                        <td><span class="badge bg-info">{{ job.market }}</span></td>
-                        <td>{{ job.source_job_portal.name|default:"-" }}</td>
-                        <td>{{ job.scraped_at|date:"Y-m-d H:i" }}</td>
-                    </tr>
-                    {% empty %}
-                    <tr>
-                        <td colspan="6" class="text-center text-muted">No jobs scraped yet</td>
+                        <td>{{ forloop.counter }}</td>
+                        <td>
+                            <strong>{{ job.job_title }}</strong>
+                            {% if job.job_type %}
+                                <br><small class="badge bg-info">{{ job.job_type }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ job.company }}
+                            {% if job.company_size and job.company_size != 'UNKNOWN' %}
+                                <br><small class="text-muted">{{ job.get_company_size_display }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {{ job.location|default:"-" }}
+                            <br><small class="badge bg-secondary">{{ job.market }}</small>
+                        </td>
+                        <td>
+                            {% if job.source_job_portal %}
+                                <span class="badge bg-primary">{{ job.source_job_portal.name }}</span>
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ job.posted_date|date:"M d, Y"|default:"-" }}</td>
+                        <td>
+                            <a href="{{ job.job_link }}" target="_blank" class="btn btn-sm btn-outline-primary">
+                                <i class="fas fa-external-link-alt"></i> View Job
+                            </a>
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
-        <div class="text-center">
-            <a href="{% url 'jobs_page' %}" class="btn btn-primary">View All Jobs</a>
+        <!-- Pagination Controls for Home Page -->
+        {% if paginator.num_pages > 1 %}
+        <div class="d-flex flex-wrap justify-content-between align-items-center mt-4 bg-light p-3 border rounded">
+            <div class="mb-2 mb-md-0">
+                <strong>Showing {{ page_obj.start_index }} to {{ page_obj.end_index }} of {{ total_jobs }} jobs</strong>
+            </div>
+            
+            <!-- Page Size Selector -->
+            <div class="d-flex align-items-center me-3 mb-2 mb-md-0">
+                <span class="me-2">Show:</span>
+                <div class="btn-group">
+                    <a href="?per_page=10{% if request.GET.company %}&company={{ request.GET.company }}{% endif %}{% if request.GET.market %}&market={{ request.GET.market }}{% endif %}{% if request.GET.field %}&field={{ request.GET.field }}{% endif %}" class="btn btn-sm {% if request.GET.per_page == '10' or not request.GET.per_page %}btn-primary{% else %}btn-outline-primary{% endif %}">10</a>
+                    <a href="?per_page=20{% if request.GET.company %}&company={{ request.GET.company }}{% endif %}{% if request.GET.market %}&market={{ request.GET.market }}{% endif %}{% if request.GET.field %}&field={{ request.GET.field }}{% endif %}" class="btn btn-sm {% if request.GET.per_page == '20' %}btn-primary{% else %}btn-outline-primary{% endif %}">20</a>
+                    <a href="?per_page=50{% if request.GET.company %}&company={{ request.GET.company }}{% endif %}{% if request.GET.market %}&market={{ request.GET.market }}{% endif %}{% if request.GET.field %}&field={{ request.GET.field }}{% endif %}" class="btn btn-sm {% if request.GET.per_page == '50' %}btn-primary{% else %}btn-outline-primary{% endif %}">50</a>
+                </div>
+            </div>
+            
+            <!-- Pagination Controls -->
+            <nav aria-label="Job pagination" class="mb-2 mb-md-0">
+                <ul class="pagination pagination-sm mb-0">
+                    {% if page_obj.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page=1{% if request.GET.per_page %}&per_page={{ request.GET.per_page }}{% endif %}" aria-label="First">
+                            <span aria-hidden="true">&laquo;&laquo;</span>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ page_obj.previous_page_number }}{% if request.GET.per_page %}&per_page={{ request.GET.per_page }}{% endif %}" aria-label="Previous">
+                            <span aria-hidden="true">&laquo;</span>
+                        </a>
+                    </li>
+                    {% endif %}
+                    
+                    {% for num in paginator.page_range %}
+                        {% if page_obj.number == num %}
+                        <li class="page-item active"><a class="page-link" href="#">{{ num }}</a></li>
+                        {% elif num > page_obj.number|add:'-3' and num < page_obj.number|add:'3' %}
+                        <li class="page-item"><a class="page-link" href="?page={{ num }}{% if request.GET.per_page %}&per_page={{ request.GET.per_page }}{% endif %}">{{ num }}</a></li>
+                        {% endif %}
+                    {% endfor %}
+                    
+                    {% if page_obj.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ page_obj.next_page_number }}{% if request.GET.per_page %}&per_page={{ request.GET.per_page }}{% endif %}" aria-label="Next">
+                            <span aria-hidden="true">&raquo;</span>
+                        </a>
+                    </li>
+                    <li class="page-item">
+                        <a class="page-link" href="?page={{ paginator.num_pages }}{% if request.GET.per_page %}&per_page={{ request.GET.per_page }}{% endif %}" aria-label="Last">
+                            <span aria-hidden="true">&raquo;&raquo;</span>
+                        </a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </nav>
         </div>
+        {% else %}
+        <div class="text-center mt-3">
+            <p class="text-muted">Download CSV for full list or view all on <a href="{% url 'jobs_page' %}">Jobs page</a>.</p>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="text-center py-5">
+            <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+            <h5 class="text-muted">No jobs scraped yet</h5>
+            <p class="text-muted">Configure filters above and click "Run Now" to start scraping</p>
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-function deleteScraperRun(runId, runName) {
-    if (confirm(`Are you sure you want to delete scraper run ${runName}?\n\nThis will:\n✓ Stop the process if running\n✓ Delete all associated data\n✓ This action cannot be undone`)) {
-        // Show loading state
-        const btn = event.target.closest('button');
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Deleting...';
-        
-        // Navigate to delete URL
-        window.location.href = '/scraper-runs/' + runId + '/delete/';
-    }
+function deleteAllJobs() {
+    const totalJobs = {{ total_jobs }};
+    
+    Swal.fire({
+        title: '⚠️ WARNING',
+        html: `This will permanently delete <strong>ALL ${totalJobs} jobs</strong>!<br><br>This action cannot be undone.<br><br>Are you absolutely sure?`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#ef476f',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Yes, delete all!',
+        cancelButtonText: 'Cancel'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            // Final confirmation
+            Swal.fire({
+                title: 'Final Confirmation',
+                text: `Delete ALL ${totalJobs} jobs?`,
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#ef476f',
+                cancelButtonColor: '#6c757d',
+                confirmButtonText: 'Yes, delete all!',
+                cancelButtonText: 'Cancel'
+            }).then((finalResult) => {
+                if (finalResult.isConfirmed) {
+                    // Show loading overlay
+                    Swal.fire({
+                        title: 'Deleting...',
+                        text: 'Please wait while we delete all jobs.',
+                        allowOutsideClick: false,
+                        allowEscapeKey: false,
+                        showConfirmButton: false,
+                        didOpen: () => {
+                            Swal.showLoading();
+                        }
+                    });
+                    
+                    // Navigate to delete all URL
+                    window.location.href = '/jobs/delete-all/';
+                }
+            });
+        }
+    });
 }
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Portal selection toggle
+    document.getElementById('allPortals').addEventListener('change', function() {
+        document.getElementById('singlePortalSelect').style.display = 'none';
+    });
+    document.getElementById('singlePortal').addEventListener('change', function() {
+        document.getElementById('singlePortalSelect').style.display = 'block';
+    });
+
+    // Run Now button
+    document.getElementById('runNowBtn').addEventListener('click', function() {
+        const form = document.getElementById('scraperForm');
+        const keywords = form.querySelectorAll('input[name="keywords"]:checked');
+        
+        if (keywords.length === 0) {
+            Swal.fire({
+                icon: 'error',
+                title: 'No Keywords Selected',
+                text: 'Please select at least one keyword to run the scraper.',
+                confirmButtonColor: '#4361ee'
+            });
+            return;
+        }
+
+        // Show confirmation
+        Swal.fire({
+            title: 'Run Scraper Now?',
+            html: `
+                <p>This will start scraping jobs with your current configuration:</p>
+                <ul class="text-start">
+                    <li><strong>Keywords:</strong> ${keywords.length} selected</li>
+                    <li><strong>Time Filter:</strong> ${document.getElementById('timeFilter').options[document.getElementById('timeFilter').selectedIndex].text}</li>
+                    <li><strong>Job Type:</strong> ${document.getElementById('jobType').options[document.getElementById('jobType').selectedIndex].text}</li>
+                    <li><strong>Location:</strong> ${document.getElementById('location').options[document.getElementById('location').selectedIndex].text}</li>
+                </ul>
+                <p class="text-muted"><small>This may take 1-5 minutes depending on the number of portals.</small></p>
+            `,
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonColor: '#06d6a0',
+            cancelButtonColor: '#6c757d',
+            confirmButtonText: 'Yes, Run Now!',
+            cancelButtonText: 'Cancel'
+        }).then((result) => {
+            if (result.isConfirmed) {
+                // Create a temporary filter and run it
+                runScraperNow();
+            }
+        });
+    });
+
+    // Get CSRF token from cookie
+    function getCookie(name) {
+        let cookieValue = null;
+        if (document.cookie && document.cookie !== '') {
+            const cookies = document.cookie.split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i].trim();
+                if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                    break;
+                }
+            }
+        }
+        return cookieValue;
+    }
+
+    function runScraperNow() {
+        const form = document.getElementById('scraperForm');
+        const formData = new FormData(form);
+        
+        // Show loading overlay
+        const overlay = document.createElement('div');
+        overlay.id = 'loading-overlay';
+        overlay.innerHTML = `
+            <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+                <div style="background: white; padding: 40px; border-radius: 15px; text-align: center; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+                    <div class="spinner-border text-primary mb-3" style="width: 4rem; height: 4rem;" role="status"></div>
+                    <h4>🚀 Running Scraper...</h4>
+                    <p class="text-muted">Fetching jobs from selected portals<br>⏳ This may take 1-5 minutes<br><small>Please wait...</small></p>
+                    <div class="progress mt-3" style="height: 25px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width: 100%">Processing...</div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        // Get CSRF token
+        const csrftoken = getCookie('csrftoken') || formData.get('csrfmiddlewaretoken');
+        
+        // Get portal IDs
+        let portalIds = [];
+        if (!form.querySelector('#allPortals').checked) {
+            const portalSelect = form.querySelector('#portalSelect');
+            if (portalSelect && portalSelect.value) {
+                portalIds = [parseInt(portalSelect.value)];
+            }
+        }
+
+        // Create filter first, then run
+        fetch('/api/run_scraper/', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrftoken,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                keywords: Array.from(form.querySelectorAll('input[name="keywords"]:checked')).map(cb => parseInt(cb.value)),
+                portals: portalIds,
+                time_filter: formData.get('time_filter'),
+                job_type: formData.get('job_type'),
+                location: formData.get('location'),
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success' || data.task_id) {
+                // Redirect to jobs page after a delay
+                setTimeout(() => {
+                    window.location.href = '/jobs/';
+                }, 2000);
+            } else {
+                document.body.removeChild(overlay);
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Error',
+                    text: data.error || 'Failed to start scraper',
+                    confirmButtonColor: '#4361ee'
+                });
+            }
+        })
+        .catch(error => {
+            document.body.removeChild(overlay);
+            Swal.fire({
+                icon: 'error',
+                title: 'Error',
+                text: 'Failed to start scraper: ' + error.message,
+                confirmButtonColor: '#4361ee'
+            });
+        });
+    }
+});
 </script>
 {% endblock %}
-

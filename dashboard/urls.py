@@ -17,6 +17,7 @@ router.register(r'jobs', views.JobViewSet)
 urlpatterns = [
     # API endpoints
     path('api/', include(router.urls)),
+    path('api/run_scraper/', views.run_scraper_api, name='run_scraper_api'),
     
     # Traditional views
     path('', views.dashboard_home, name='dashboard_home'),

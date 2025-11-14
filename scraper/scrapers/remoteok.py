@@ -30,7 +30,7 @@ class RemoteOKScraper(BaseScraper):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            response = requests.get(url, headers=headers, timeout=3)  # 3 second timeout
+            response = requests.get(url, headers=headers, timeout=30)  # 30 second timeout for API calls
             response.raise_for_status()
             
             data = response.json()
@@ -38,28 +38,37 @@ class RemoteOKScraper(BaseScraper):
             # First item is metadata, skip it
             job_listings = data[1:] if len(data) > 1 else []
             
-            logger.info(f"Remote OK API returned {len(job_listings)} jobs")
+            logger.info(f"Remote OK API returned {len(job_listings)} total jobs")
             
             # Process ALL jobs from API (no limit) - user wants all available jobs
+            if not job_listings:
+                logger.warning("Remote OK API returned empty job list - API might have changed or be down")
+                return jobs
             
-            logger.info(f"Processing {len(job_listings)} jobs...")
+            logger.info(f"Processing {len(job_listings)} jobs with keywords: {self.keywords}")
             
             for job_data in job_listings:
                 try:
-                    # Filter by keywords
+                    # Filter by keywords - less strict matching
                     position = job_data.get('position', '').lower()
                     tags = ' '.join(job_data.get('tags', [])).lower()
+                    description = (job_data.get('description') or '').lower()
                     
-                    # ✅ Broaden match: title or tags must contain keyword
+                    # ✅ Broaden match: check title, tags, AND description
                     if self.keywords:
-                        position_lower = position.lower()
-                        tags_lower = tags.lower()
                         keyword_match = any(
-                            (kw.lower() in position_lower) or (kw.lower() in tags_lower)
+                            (kw.lower() in position) or 
+                            (kw.lower() in tags) or
+                            (kw.lower() in description) or
+                            # Also check if any word from keyword is in position
+                            any(word in position for word in kw.lower().split() if len(word) > 3)
                             for kw in self.keywords
                         )
                         if not keyword_match:
                             continue
+                    else:
+                        # If no keywords provided, include all jobs
+                        pass
                     
                     # Parse posted date
                     posted_date = None
@@ -90,6 +99,7 @@ class RemoteOKScraper(BaseScraper):
                         'company': job_data.get('company', ''),
                         'company_url': company_url,
                         'company_size': company_size,
+                        'company_profile_url': None,  # RemoteOK API doesn't provide company profile URLs
                         'market': 'USA',
                         'job_link': f"https://remoteok.com/remote-jobs/{job_data.get('id', '')}",
                         'posted_date': posted_date,

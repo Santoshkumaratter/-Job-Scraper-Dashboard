@@ -59,7 +59,7 @@
                 
                 <div class="d-flex gap-2">
                     <button onclick="runScraper({{ filter.id }}, '{{ filter.name }}')" class="btn btn-success" id="scrape-btn-{{ filter.id }}">
-                        <i class="fas fa-play"></i> Find Jobs
+                        <i class="fas fa-play"></i> Run Now
                     </button>
                     <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editFilterModal{{ filter.id }}">
                         <i class="fas fa-edit"></i> Edit
@@ -83,17 +83,7 @@
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
                     <div class="modal-body">
-                        <div class="mb-3">
-                            <label class="form-label">Filter Name *</label>
-                            <input type="text" class="form-control" name="name" value="{{ filter.name }}" required>
-                        </div>
-                        
-                        <div class="mb-3">
-                            <label class="form-label">Description</label>
-                            <textarea class="form-control" name="description" rows="2">{{ filter.description }}</textarea>
-                        </div>
-                        
-                        <div class="row">
+                    <div class="row">
                             <div class="col-md-4">
                                 <div class="mb-3">
                                     <label class="form-label">Job Type</label>
@@ -208,16 +198,6 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body">
-                    <div class="mb-3">
-                        <label class="form-label">Filter Name *</label>
-                        <input type="text" class="form-control" name="name" required placeholder="e.g., React Jobs UK">
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label class="form-label">Description</label>
-                        <textarea class="form-control" name="description" rows="2" placeholder="Optional description"></textarea>
-                    </div>
-                    
                     <div class="row">
                         <div class="col-md-4">
                             <div class="mb-3">
@@ -312,6 +292,28 @@
 
 {% block extra_js %}
 <script>
+// Form validation for create filter
+document.addEventListener('DOMContentLoaded', function() {
+    const createFilterForm = document.querySelector('#createFilterModal form');
+    if (createFilterForm) {
+        createFilterForm.addEventListener('submit', function(e) {
+            const keywords = createFilterForm.querySelectorAll('input[name="keywords"]:checked');
+            const portals = createFilterForm.querySelectorAll('input[name="portals"]:checked');
+            
+            if (keywords.length === 0 && portals.length === 0) {
+                e.preventDefault();
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Validation Error',
+                    text: 'Please select at least one keyword or portal to create a filter.',
+                    confirmButtonColor: '#4361ee'
+                });
+                return false;
+            }
+        });
+    }
+});
+
 function runScraper(filterId, filterName) {
     const btn = document.getElementById('scrape-btn-' + filterId);
     const originalHtml = btn.innerHTML;
@@ -346,9 +348,20 @@ function runScraper(filterId, filterName) {
 }
 
 function deleteFilter(filterId, filterName) {
-    if (confirm(`Are you sure you want to delete filter "${filterName}"?`)) {
-        window.location.href = '/filters/' + filterId + '/delete/';
-    }
+    Swal.fire({
+        title: 'Delete Filter?',
+        text: `Are you sure you want to delete filter "${filterName}"? This action cannot be undone.`,
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#ef476f',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Yes, delete it!',
+        cancelButtonText: 'Cancel'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            window.location.href = '/filters/' + filterId + '/delete/';
+        }
+    });
 }
 
 // Select All functionality

@@ -1,12 +1,13 @@
 """
 Indeed UK Job Scraper
 """
-from typing import List, Dict, Optional
-from ..utils.base_scraper import BaseScraper
-import urllib.parse
-import logging
 import json
+import logging
 import re
+import urllib.parse
+from typing import List, Dict, Optional
+
+from ..utils.base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class IndeedUKScraper(BaseScraper):
     
     @property
     def requires_selenium(self) -> bool:
-        return True  # Indeed blocks regular requests
+        return True
     
     def build_search_url(self, keyword: str) -> str:
         """Build Indeed UK search URL"""
@@ -50,121 +51,195 @@ class IndeedUKScraper(BaseScraper):
         return f"{self.base_url}/jobs?{query_string}"
     
     def scrape_jobs(self) -> List[Dict]:
-        """Scrape jobs from Indeed UK"""
+        """Scrape jobs from Indeed UK with pagination for maximum jobs"""
         jobs = []
+        seen_job_ids = set()  # Deduplicate across pages
         
         for keyword in self.keywords:
-            url = self.build_search_url(keyword)
-            html = self.make_request(url, use_selenium=True)  # Use Selenium
+            base_url = self.build_search_url(keyword)
             
-            if not html:
-                logger.warning(f"Failed to fetch page for keyword: {keyword}")
-                continue
-            
-            soup = self.parse_html(html)
-            
-            # Find job cards
-            job_cards = soup.find_all('div', class_='job_seen_beacon')
-            
-            for card in job_cards:
+            # Fetch multiple pages for maximum jobs (500+ jobs)
+            max_pages = 50  # Fetch up to 50 pages (10 jobs per page = 500+ jobs)
+            for page_num in range(max_pages):
                 try:
-                    # Extract job information
-                    title_elem = card.find('h2', class_='jobTitle')
-                    if not title_elem:
-                        continue
+                    # Build URL with pagination
+                    if page_num == 0:
+                        url = base_url
+                    else:
+                        # Indeed uses start parameter for pagination (10 jobs per page)
+                        start = page_num * 10
+                        url = f"{base_url}&start={start}"
                     
-                    job_title = self.clean_text(title_elem.get_text())
-                    job_link_elem = title_elem.find('a')
-                    job_id = job_link_elem.get('data-jk', '') if job_link_elem else ''
-                    job_link = f"{self.base_url}/viewjob?jk={job_id}" if job_id else ''
+                    logger.info(f"Indeed UK: Fetching page {page_num + 1}/{max_pages} for keyword '{keyword}'")
+                    html = self.make_request(url, use_selenium=True)
+                    if not html:
+                        logger.warning(f"Indeed UK: No HTML returned for page {page_num + 1}")
+                        break  # Stop if page fails
                     
-                    # Company name
-                    company_elem = card.find('span', class_='companyName')
-                    company = self.clean_text(company_elem.get_text()) if company_elem else 'Unknown'
+                    soup = self.parse_html(html)
                     
-                    # Location
-                    location_elem = card.find('div', class_='companyLocation')
-                    location = self.clean_text(location_elem.get_text()) if location_elem else ''
+                    # Find job cards - try multiple selectors
+                    job_cards = []
+                    selectors = [
+                        ('div', {'class': 'job_seen_beacon'}),
+                        ('div', {'class': 'jobCard'}),
+                        ('div', {'class': 'job'}),
+                        ('div', {'class': lambda x: x and 'job' in ' '.join(x).lower()}),
+                    ]
                     
-                    # Posted date - try multiple selectors
-                    posted_date = None
-                    date_elem = card.find('span', class_='date') or card.find('span', class_='dateText')
-                    if date_elem:
-                        date_text = date_elem.get_text()
-                        if date_text:
-                            posted_date = self.parse_date(date_text)
+                    for tag, attrs in selectors:
+                        found = soup.find_all(tag, attrs)
+                        if found:
+                            job_cards.extend(found)
+                            break
                     
-                    # Also try extracting from attributes/data
-                    if not posted_date:
-                        date_attr = card.get('data-date', '') or card.get('data-posted-date', '')
-                        if date_attr:
-                            posted_date = self.parse_date(date_attr)
+                    # ✅ USE MultiApproachExtractor as fallback if standard selectors fail
+                    if not job_cards:
+                        logger.info(f"Indeed UK: Standard selectors failed, trying MultiApproachExtractor...")
+                        from ..utils.multi_approach_scraper import MultiApproachExtractor
+                        job_cards = MultiApproachExtractor.extract_jobs_from_soup(soup, self.base_url, self.keywords)
                     
-                    # Check time filter
-                    if not self.should_include_job(posted_date):
-                        continue
+                    if not job_cards:
+                        logger.info(f"Indeed UK: No more job cards found on page {page_num + 1}, stopping pagination")
+                        break  # No more jobs on this page
                     
-                    # ✅ STRICT KEYWORD CHECK - Must match current keyword
-                    if not self.matches_keyword(job_title, keyword):
-                        continue
+                    logger.info(f"Indeed UK: Found {len(job_cards)} job cards on page {page_num + 1}")
                     
-                    detail = self._fetch_job_detail(job_link)
-                    description = detail.get('description', '')
-                    if detail.get('company'):
-                        company = detail['company']
-                    company_url = detail.get('company_url')
-                    
-                    # Fetch company profile/detail page for real company URL and size (if available)
-                    company_profile_url = detail.get('company_profile_url')
-                    if company_profile_url:
-                        profile_data = self._fetch_company_profile(company_profile_url)
-                        if profile_data:
-                            # Use real website URL from company profile
-                            if profile_data.get('website_url'):
-                                company_url = profile_data['website_url']
-                            # Use real company size from profile
-                            if profile_data.get('company_size'):
-                                detail['company_size'] = profile_data['company_size']
-                            # Update company name if different
-                            if profile_data.get('company_name'):
-                                company = profile_data['company_name']
-                    
-                    if detail.get('location'):
-                        location = detail['location']
-                    if detail.get('posted_date'):
-                        posted_date = detail['posted_date']
+                    page_jobs_count = 0
+                    for card in job_cards:
+                        try:
+                            # Extract job information
+                            title_elem = card.find('h2', class_='jobTitle')
+                            if not title_elem:
+                                continue
+                            
+                            job_title = self.clean_text(title_elem.get_text())
+                            job_link_elem = title_elem.find('a')
+                            job_id = job_link_elem.get('data-jk', '') if job_link_elem else ''
+                            job_link = f"{self.base_url}/viewjob?jk={job_id}" if job_id else ''
+                            
+                            # Company name
+                            company_elem = card.find('span', class_='companyName')
+                            company = self.clean_text(company_elem.get_text()) if company_elem else ''
+                            
+                            # Location
+                            location_elem = card.find('div', class_='companyLocation')
+                            location = self.clean_text(location_elem.get_text()) if location_elem else ''
+                            
+                            # Posted date - try multiple selectors
+                            posted_date = None
+                            date_elem = card.find('span', class_='date') or card.find('span', class_='dateText')
+                            if date_elem:
+                                date_text = date_elem.get_text()
+                                if date_text:
+                                    posted_date = self.parse_date(date_text)
+                            
+                            # Also try extracting from attributes/data
+                            if not posted_date:
+                                date_attr = card.get('data-date', '') or card.get('data-posted-date', '')
+                                if date_attr:
+                                    posted_date = self.parse_date(date_attr)
+                            
+                            # Check time filter
+                            if not self.should_include_job(posted_date):
+                                continue
+                            
+                            # ✅ REMOVED STRICT KEYWORD CHECK - Extract all jobs
+                            
+                            detail = self._fetch_job_detail(job_link)
+                            description = detail.get('description', '')
+                            if detail.get('company'):
+                                company = detail['company']
+                            company_url = detail.get('company_url')
+                            
+                            # Fetch company profile/detail page for real company URL and size (if available)
+                            company_profile_url = detail.get('company_profile_url')
+                            if company_profile_url:
+                                profile_data = self._fetch_company_profile(company_profile_url)
+                                if profile_data:
+                                    # Use real website URL from company profile
+                                    if profile_data.get('website_url'):
+                                        company_url = profile_data['website_url']
+                                    # Use real company size from profile
+                                    if profile_data.get('company_size'):
+                                        detail['company_size'] = profile_data['company_size']
+                                    # Update company name if different
+                                    if profile_data.get('company_name'):
+                                        company = profile_data['company_name']
+                            
+                            if detail.get('location'):
+                                location = detail['location']
+                            if detail.get('posted_date'):
+                                posted_date = detail['posted_date']
 
-                    real_job_type = self.detect_job_type(job_title, location, description)
-                    if real_job_type == 'UNKNOWN':
-                        mapped = self._map_employment(detail.get('employment_type'), detail.get('workplace_type'))
-                        if mapped:
-                            real_job_type = mapped
+                            real_job_type = self.detect_job_type(job_title, location, description)
+                            if real_job_type == 'UNKNOWN':
+                                mapped = self._map_employment(detail.get('employment_type'), detail.get('workplace_type'))
+                                if mapped:
+                                    real_job_type = mapped
 
-                    if not self.matches_job_type_filter(real_job_type):
-                        continue
+                            if not self.matches_job_type_filter(real_job_type):
+                                continue
 
-                    if not company:
-                        continue
+                            # If still no company, infer from job link
+                            if not company or company.lower() in ['unknown', 'company not listed', '']:
+                                try:
+                                    from urllib.parse import urlparse
+                                    domain = urlparse(job_link).netloc
+                                    if domain:
+                                        company = domain.replace('www.', '').split('.')[0].title()
+                                except:
+                                    company = 'Company Not Listed'
 
-                    job_data = {
-                        'job_title': job_title,
-                        'company': company,
-                        'company_url': company_url,
-                        'company_size': detail.get('company_size', 'UNKNOWN'),
-                        'market': self._infer_market(location),
-                        'job_link': job_link,
-                        'posted_date': posted_date,
-                        'location': location,
-                        'job_description': description,
-                        'job_type': real_job_type,
-                        'salary_range': detail.get('salary_range', ''),
-                    }
+                            # ONLY require job_title (company can be inferred)
+                            if job_title:
+                                job_data = {
+                                    'job_title': job_title,
+                                    'company': company if company else 'Company Not Listed',
+                                    'company_url': company_url or '',
+                                    'company_size': detail.get('company_size', '') if detail.get('company_size') not in ['UNKNOWN', 'Unknown', ''] else '',
+                                    'company_profile_url': company_profile_url or None,
+                                    'market': self._infer_market(location),
+                                    'job_link': job_link,
+                                    'posted_date': posted_date,
+                                    'location': location if location else '',
+                                    'job_description': description if description else '',
+                                    'job_type': real_job_type,
+                                    'salary_range': detail.get('salary_range', ''),
+                                }
+                                
+                                # Deduplicate by job ID
+                                job_id_val = job_data.get('job_link', '').split('jk=')[-1] if 'jk=' in job_data.get('job_link', '') else ''
+                                if job_id_val and job_id_val in seen_job_ids:
+                                    continue
+                                seen_job_ids.add(job_id_val)
+                                
+                                jobs.append(job_data)
+                            page_jobs_count += 1
+                            
+                            # Stop if we've reached the maximum per keyword
+                            if len(jobs) >= self.max_jobs_per_keyword:
+                                logger.info(f"Indeed UK: Reached maximum jobs ({self.max_jobs_per_keyword}) for keyword '{keyword}'")
+                                break
+                            
+                        except Exception as e:
+                            logger.error(f"Error parsing job card: {str(e)}")
+                            continue
                     
-                    jobs.append(job_data)
+                    # If no new jobs found on this page, stop pagination
+                    if page_jobs_count == 0:
+                        logger.info(f"Indeed UK: No new jobs found on page {page_num + 1}, stopping pagination")
+                        break
                     
+                    # Stop if we've reached the maximum per keyword
+                    if len(jobs) >= self.max_jobs_per_keyword:
+                        break
+                
                 except Exception as e:
-                    logger.error(f"Error parsing job card: {str(e)}")
-                    continue
+                    logger.error(f"Indeed UK: Error fetching page {page_num + 1}: {str(e)}")
+                    break  # Stop pagination on error
+            
+            logger.info(f"Indeed UK: Total jobs found for keyword '{keyword}': {len(jobs)}")
         
         return jobs
 
@@ -296,12 +371,10 @@ class IndeedUKScraper(BaseScraper):
                             dt = datetime.strptime(date_str, '%Y-%m-%d')
                             detail['posted_date'] = dt.date()
                         except:
-                            # Fallback to parse_date for other formats
                             parsed = self.parse_date(date_posted)
                             if parsed:
                                 detail['posted_date'] = parsed
                     elif isinstance(date_posted, str):
-                        # Regular date string - use parse_date
                         parsed = self.parse_date(date_posted)
                         if parsed:
                             detail['posted_date'] = parsed
@@ -349,18 +422,16 @@ class IndeedUKScraper(BaseScraper):
             else:
                 count = int(count)
             
-            if count >= 100000:
+            if count >= 10001:
                 return 'ENTERPRISE'
-            elif count >= 10000:
+            elif count >= 1001:
                 return 'LARGE'
-            elif count >= 1000:
+            elif count >= 51:
                 return 'MEDIUM'
-            elif count >= 50:
-                return 'SMALL'
             else:
                 return 'SMALL'
         except:
-            return 'UNKNOWN'
+            return ''
     
     def _parse_company_size_from_range(self, min_val: any, max_val: any) -> str:
         """Convert employee range to size category"""
@@ -375,18 +446,16 @@ class IndeedUKScraper(BaseScraper):
             else:
                 max_val = int(max_val)
             
-            avg = (min_val + max_val) / 2
-            
-            if avg >= 100000:
+            if max_val >= 10001:
                 return 'ENTERPRISE'
-            elif avg >= 10000:
+            elif max_val >= 1001:
                 return 'LARGE'
-            elif avg >= 1000:
+            elif max_val >= 51:
                 return 'MEDIUM'
             else:
                 return 'SMALL'
         except:
-            return 'UNKNOWN'
+            return ''
     
     def _extract_company_size_from_html(self, soup) -> Optional[str]:
         """Extract company size from Indeed HTML"""

@@ -1,441 +1,244 @@
-# Job Data Scraping Dashboard
+# Job Data Scraper with Dashboard Management
 
-## 📋 Project Overview
+## Project Overview
 
-An automated job data scraping system with a user-friendly dashboard that collects job listings from **36+ job portals** and exports data to Google Sheets. Built with Django, Celery, and Beautiful Soup/Selenium.
+This application provides an automated job data scraper integrated with a user-friendly dashboard. The scraper collects detailed job listings from various job portals and stores the data for easy access. The dashboard allows non-technical users to manage job-related keywords, apply filters, save and load specific job search filters, and retrieve job data.
 
-### ✨ Key Features
+## Features
 
-- ✅ **36 Job Portal Scrapers** - Indeed, LinkedIn, Glassdoor, ZipRecruiter, and 32 more
-- ✅ **Smart Filtering** - Filter by job type, location, time posted, keywords
-- ✅ **Decision Maker Finder** - Automatically finds hiring managers and their contact info
-- ✅ **Google Sheets Export** - Seamless integration with Google Sheets
-- ✅ **Async Processing** - Background scraping with Celery
-- ✅ **User-Friendly Dashboard** - Intuitive UI for non-technical users
-- ✅ **Save & Load Filters** - Create reusable scraping configurations
-- ✅ **REST API** - Full API access for automation
+### Job Data Scraper
 
----
+The scraper extracts the following fields from job portals:
 
-## 🚀 Quick Start
+- **Job_Title**: The title of the job
+- **Company**: The name of the hiring company
+- **Company_URL**: The website link to the company
+- **Company_Size**: The size of the company (e.g., small, medium, large)
+- **Market**: The market of the job posting (USA or UK)
+- **Source_Job-Portal**: The name of the job portal
+- **Job_Link**: The URL for the job listing
+- **Posted_Date**: The date the job was posted
+- **Location**: The location of the job
+- **Decision_Maker_Name**: The name of the decision maker (HR, Hiring Manager, etc.)
+- **Decision_Maker_Title**: The title of the decision-maker
+- **Decision_Maker_LinkedIn**: LinkedIn profile URL of the decision-maker
+- **Decision_Maker_Email**: Email address of the decision-maker
+
+### Supported Job Portals
+
+The system scrapes jobs from **32 active job portals** (Indeed UK and Glassdoor are disabled due to blocking issues):
+
+1. LinkedIn Jobs
+2. CV-Library
+3. Adzuna
+4. Totaljobs
+5. Reed
+6. Talent
+7. ZipRecruiter
+8. CWjobs
+9. Jobsora
+10. WelcometotheJungle
+11. IT Job Board
+12. Trueup
+13. Redefined
+14. We Work Remotely
+15. AngelList (Wellfound)
+16. Jobspresso
+17. Grabjobs
+18. Remote OK
+19. Working Nomads
+20. WorkInStartups
+21. Jobtensor
+22. Jora
+23. SEOJobs.com
+24. CareerBuilder
+25. Dice
+26. Escape The City
+27. Jooble
+28. Otta
+29. Remote.co
+30. SEL Jobs
+31. FlexJobs
+32. Dynamite Jobs
+33. SimplyHired
+34. Remotive
+
+**Note:** Indeed UK and Glassdoor are currently disabled due to anti-scraping measures. They can be re-enabled in the future with improved anti-blocking techniques.
+
+### Dashboard Functionality
+
+The dashboard provides a user-friendly interface for:
+
+- **Keyword Management**: Add, edit, and delete job-related keywords
+- **Filter Options**: 
+  - Job Type: Remote, Freelance, Full-time, Hybrid, or All
+  - Time Filter: Last 24 hours, 3 days, 7 days, All Time
+  - Location: USA, UK, or All
+- **Save and Load Filters**: Save specific combinations of keywords and filters for future use
+- **Job Data Export**: Export job data to CSV format
+- **Real-time Job Tracking**: View scraped jobs in real-time
+
+## Getting Started
 
 ### Prerequisites
 
-- Python 3.8+
-- Redis Server (for Celery)
-- Google Sheets API Credentials
-- Chrome/Chromium (for Selenium)
+- Python 3.8 or higher
+- pip (Python package manager)
+- Virtual environment (recommended)
 
 ### Installation
 
-1. **Clone the repository**
-```bash
-git clone <repository-url>
-cd Dashboard_job_data
-```
-
-2. **Create virtual environment**
+1. Clone the repository
+2. Create and activate a virtual environment (recommended)
 ```bash
 python -m venv venv
-# On Windows:
-venv\Scripts\activate
-# On Linux/Mac:
-source venv/bin/activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. **Install dependencies**
+3. Install the dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-4. **Setup environment variables**
+4. Set up the database
 ```bash
-copy .env.example .env
-# Edit .env with your configuration
-```
-
-5. **Google Sheets Setup**
-- Create a Google Cloud Project
-- Enable Google Sheets API
-- Create Service Account credentials
-- Download credentials.json and place in project root
-- Share your Google Sheet with the service account email
-
-6. **Database Migration**
-```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
-7. **Create superuser**
-```bash
-python manage.py createsuperuser
-```
-
-8. **Load initial data (Job Portals)**
+5. Set up initial data (job portals and default keywords)
 ```bash
 python manage.py setup_portals
 ```
 
----
+**Note:** The `setup_portals` command will:
+- Create all 32 active job portals in the database
+- Add all technical keywords (27+ keywords)
+- Add all non-technical keywords (16+ keywords)
+- Set portal priorities and configurations
 
-## 🎯 Usage
-
-### Starting the Application
-
-**1. Start Redis Server**
+6. (Optional) Configure environment variables
+   
+   Create a `.env` file in the project root for production settings:
 ```bash
-# Windows (if installed via chocolatey):
-redis-server
+   SECRET_KEY=your-secret-key-here
+   DEBUG=False
+   ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com
+   CELERY_BROKER_URL=redis://localhost:6379/0
+   HUNTER_API_KEY=your-hunter-api-key  # Optional: for email finding
+   SCRAPERAPI_KEY=your-scraperapi-key  # Optional: for proxy service
+   CLEARBIT_API_KEY=your-clearbit-key  # Optional: for company enrichment
+   ```
 
-# Linux/Mac:
-sudo systemctl start redis
-```
-
-**2. Start Django Server**
+7. Run the development server
 ```bash
 python manage.py runserver
 ```
 
-**3. Start Celery Worker**
+8. Access the dashboard at http://127.0.0.1:8000/
+
+## Usage Instructions
+
+1. **Keyword Management**:
+   - Go to the Keywords page to add or remove job-related keywords
+   - Keywords are categorized as Technical, Non-Technical, or Both
+
+2. **Running a Scraper**:
+   - From the Dashboard, select your desired keywords
+   - Choose your filters (job type, time period, location)
+   - Select job portals (or use "All Job Portals")
+   - Click "Run Now" to start the scraper
+
+3. **Viewing Results**:
+   - Go to the Jobs page to see all scraped jobs
+   - Use filters to narrow down the results
+   - Click on job titles to see details
+
+4. **Exporting Data**:
+   - Click "Download CSV" to export all job data
+   - The CSV file will contain all scraped job fields
+
+5. **Saving Filters**:
+   - After configuring your filters, you can save them for future use
+   - Access saved filters from the Filters page
+
+## Important Notes
+
+### Blocked Portals
+
+Indeed UK and Glassdoor are currently disabled due to anti-scraping measures. The system uses 32 active portals that work reliably. These blocked portals can be re-enabled in the future with improved anti-blocking techniques (rotating proxies, CAPTCHA solving, etc.).
+
+### Performance
+
+- Scraping typically completes in **2-10 minutes** depending on the number of portals selected
+- Use "All Job Portals" for maximum results
+- Use "Last 24 Hours" filter for fresh jobs (recommended)
+- The system uses parallel scraping for faster performance
+
+### Company Size Detection
+
+Company sizes are automatically detected using:
+- Known company database
+- Website scraping
+- Domain estimation
+
+If a company size shows as "UNKNOWN", it means the company information wasn't found in our database or couldn't be scraped.
+
+## Troubleshooting
+
+### No Jobs Found
+- Verify keywords match job titles
+- Try using "All Time" filter instead of "Last 24 Hours"
+- Check if portals are active in the database
+- Review `scraper.log` for errors
+
+### Scraping Too Slow
+- Try selecting fewer job portals
+- Use faster portals (Remote OK, Remotive, We Work Remotely)
+- Check your internet connection
+
+### Portals Not Working
+- Some portals may block requests (they're automatically disabled)
+- Check `scraper.log` for specific portal errors
+- Try running with different portals
+
+### Database Issues
+- Clear old jobs periodically: Use "Delete All Jobs" button
+- Reset database if needed: `python manage.py flush`
+- Run migrations: `python manage.py migrate`
+
+## Environment Variables
+
+For production deployment, create a `.env` file in the project root with the following variables:
+
 ```bash
-# In a new terminal:
-celery -A job_dashboard worker --loglevel=info
+# Django Settings
+SECRET_KEY=your-secret-key-here
+DEBUG=False
+ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com
+
+# Celery Configuration
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Optional API Keys (for enhanced features)
+HUNTER_API_KEY=your-hunter-api-key          # For email finding
+SCRAPERAPI_KEY=your-scraperapi-key          # For proxy service
+CLEARBIT_API_KEY=your-clearbit-key          # For company enrichment
+
+# Scraper Configuration
+MAX_CONCURRENT_SCRAPERS=5
+SCRAPER_TIMEOUT=30
+USE_PROXY=False
 ```
 
-**4. Start Celery Beat (Optional - for scheduled tasks)**
-```bash
-# In another terminal:
-celery -A job_dashboard beat --loglevel=info
-```
+**Security Note:** Never commit `.env` files to version control. The `.gitignore` file already excludes `.env` files.
 
-### Accessing the Dashboard
+## Documentation
 
-- **Dashboard**: http://localhost:8000/
-- **Admin Panel**: http://localhost:8000/admin/
-- **API**: http://localhost:8000/api/
+- **QUICK_START.md** - Quick setup guide
+- **USER_GUIDE.md** - Detailed user instructions
+- **DEPLOYMENT_GUIDE.md** - Production deployment guide
 
----
+## Support
 
-## 📖 User Guide
-
-### 1. Managing Keywords
-
-Navigate to **Keywords** page:
-- Click "Add Keyword" button
-- Enter keyword name (e.g., "React Developer", "SEO Specialist")
-- Select category: Technical, Non-Technical, or Both
-- Keywords are used to search across job portals
-
-**Predefined Keywords:**
-
-**Technical:**
-- React Native Developer
-- Full Stack Developer
-- Python Engineer
-- DevOps Engineer
-- AI/ML Engineer
-
-**Non-Technical:**
-- SEO Specialist
-- Digital Marketing Manager
-- PPC Specialist
-- Content Marketing Specialist
-
-### 2. Creating Filters
-
-Navigate to **Saved Filters** page:
-- Click "Create Filter" button
-- Configure your filter:
-  - **Name**: Give your filter a descriptive name
-  - **Job Type**: All, Remote, Freelance, Full Time, Hybrid
-  - **Time Filter**: 24 hours, 3 days, 7 days, All time
-  - **Location**: All, USA, UK
-  - **Keywords**: Select keywords to search
-  - **Job Portals**: Select which portals to scrape
-
-### 3. Running Scrapers
-
-From **Saved Filters** page:
-- Find your filter
-- Click "Run Scraper" button
-- Monitor progress in Dashboard > Recent Scraper Runs
-- Jobs will appear in the Jobs page
-
-### 4. Viewing Jobs
-
-Navigate to **Jobs** page:
-- Browse all scraped jobs
-- Filter by company, market
-- Click info icon to see decision makers
-- Click link icon to visit job posting
-
-### 5. Exporting to Google Sheets
-
-From **Jobs** page:
-- Click "Export to Google Sheets" button
-- Data exports with all fields including decision makers
-- Check Google Sheet for results
-
----
-
-## 🔧 Configuration
-
-### Job Portal Configuration
-
-Edit job portals in Admin Panel:
-- Go to Admin > Job Portals
-- Enable/disable portals
-- Set rate limits
-- Adjust priorities
-
-### Google Sheets Configuration
-
-Admin Panel > Google Sheet Configs:
-- Create new configuration
-- Enter Spreadsheet ID
-- Set worksheet name
-- Enable auto-export (optional)
-
-### Celery Configuration
-
-Edit `job_dashboard/celery.py` for:
-- Periodic task schedules
-- Beat schedule configuration
-- Task retry policies
-
----
-
-## 🏗️ Project Structure
-
-```
-Dashboard_job_data/
-├── job_dashboard/          # Main project settings
-│   ├── settings.py
-│   ├── urls.py
-│   └── celery.py
-├── dashboard/              # Dashboard app
-│   ├── models.py          # Keywords, Filters, ScraperRuns
-│   ├── views.py           # Dashboard views & API
-│   ├── serializers.py
-│   └── admin.py
-├── scraper/               # Scraper app
-│   ├── models.py         # Jobs, DecisionMakers
-│   ├── tasks.py          # Celery tasks
-│   ├── scraper_manager.py
-│   ├── scrapers/         # Individual portal scrapers
-│   │   ├── indeed_uk.py
-│   │   ├── linkedin_jobs.py
-│   │   └── ... (34 more)
-│   └── utils/
-│       ├── base_scraper.py
-│       └── decision_maker_finder.py
-├── google_sheets/         # Google Sheets integration
-│   ├── models.py
-│   └── services.py
-├── templates/            # HTML templates
-│   ├── base.html
-│   └── dashboard/
-├── static/              # CSS, JS, images
-├── requirements.txt     # Python dependencies
-└── README.md           # This file
-```
-
----
-
-## 🌐 Supported Job Portals
-
-### UK Portals
-1. Indeed UK
-2. CV-Library
-3. Totaljobs
-4. Reed
-5. CWjobs
-6. Adzuna
-7. Jora
-
-### US Portals
-8. LinkedIn Jobs
-9. Glassdoor
-10. ZipRecruiter
-11. CareerBuilder
-12. Dice
-13. SimplyHired
-
-### Remote Job Portals
-14. We Work Remotely
-15. Remote OK
-16. Working Nomads
-17. Remote.co
-18. FlexJobs
-19. Dynamite Jobs
-20. Remotive
-
-### Startup & Tech
-21. AngelList (Wellfound)
-22. Otta
-23. WorkInStartups
-24. Trueup
-
-### Specialized
-25. SEOJobs.com
-26. IT Job Board
-27. SEL Jobs
-28. Jobspresso
-29. Grabjobs
-
-### Aggregators
-30. Talent
-31. Jobsora
-32. Jobtensor
-33. Jooble
-
-### Additional
-34. WelcometotheJungle
-35. Redefined
-36. Escape The City
-
----
-
-## 🛠️ API Documentation
-
-### REST API Endpoints
-
-**Keywords**
-- `GET /api/keywords/` - List all keywords
-- `POST /api/keywords/` - Create keyword
-- `GET /api/keywords/{id}/` - Get keyword details
-- `PUT /api/keywords/{id}/` - Update keyword
-- `DELETE /api/keywords/{id}/` - Delete keyword
-
-**Filters**
-- `GET /api/filters/` - List all filters
-- `POST /api/filters/` - Create filter
-- `POST /api/filters/{id}/run_scraper/` - Run scraper
-- `GET /api/filters/{id}/scraper_runs/` - Get scraper runs
-
-**Jobs**
-- `GET /api/jobs/` - List jobs
-- `GET /api/jobs/{id}/` - Get job details
-- `POST /api/jobs/export_to_sheets/` - Export jobs
-
-**Query Parameters:**
-- `company` - Filter by company name
-- `market` - Filter by market (USA/UK)
-- `portal` - Filter by portal ID
-- `is_exported` - Filter by export status
-
----
-
-## 🔐 Security Notes
-
-- **Never commit** `.env` file or `credentials.json`
-- Change `SECRET_KEY` in production
-- Set `DEBUG=False` in production
-- Use environment variables for sensitive data
-- Restrict Google Sheets API access
-
----
-
-## 📊 Data Fields
-
-Each job entry includes:
-- Job Title
-- Company Name & URL
-- Company Size
-- Market (USA/UK)
-- Source Job Portal
-- Job Link
-- Posted Date
-- Location
-- Job Type
-- Decision Maker Name(s)
-- Decision Maker Title(s)
-- Decision Maker LinkedIn
-- Decision Maker Email
-- Scraped At timestamp
-
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**1. Celery not working**
-- Ensure Redis is running
-- Check Celery worker logs
-- Verify `CELERY_BROKER_URL` in settings
-
-**2. Google Sheets export fails**
-- Verify `credentials.json` exists
-- Check service account has edit access to sheet
-- Ensure Spreadsheet ID is correct
-
-**3. Selenium errors**
-- Install Chrome/Chromium
-- Update chromedriver: `pip install --upgrade webdriver-manager`
-- Check headless mode settings
-
-**4. Scraper not finding jobs**
-- Website structure may have changed
-- Check scraper logs
-- Verify portal is active
-- Check rate limiting
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! To add a new job portal:
-
-1. Create new scraper file in `scraper/scrapers/`
-2. Inherit from `BaseScraper`
-3. Implement required methods
-4. Add to `SCRAPER_REGISTRY` in `__init__.py`
-5. Create JobPortal entry in database
-
----
-
-## 📝 License
-
-This project is for educational and personal use. Ensure compliance with job portal terms of service and robots.txt when scraping.
-
----
-
-## 👨‍💻 Support
-
-For issues and questions:
-- Check troubleshooting section
-- Review Django and Celery logs
-- Inspect browser network tab for API errors
-
----
-
-## 🎓 Tech Stack
-
-- **Backend**: Django 5.2, Python 3.8+
-- **Database**: SQLite (PostgreSQL recommended for production)
-- **Task Queue**: Celery + Redis
-- **Scraping**: BeautifulSoup4, Selenium, Requests
-- **API**: Django REST Framework
-- **Frontend**: Bootstrap 5, jQuery
-- **Integration**: Google Sheets API
-
----
-
-## 📈 Future Enhancements
-
-- [ ] Email notifications
-- [ ] Advanced analytics dashboard
-- [ ] Job matching algorithm
-- [ ] Auto-application system
-- [ ] Multi-language support
-- [ ] Mobile app
-- [ ] LinkedIn API integration
-- [ ] Salary predictions
-- [ ] Company reviews integration
-
----
-
-**Happy Scraping! 🚀**
-
+For any issues or questions, please check the documentation files or review the logs in `scraper.log`.

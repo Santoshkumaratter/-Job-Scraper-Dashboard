@@ -21,10 +21,10 @@ class JobSerializer(serializers.ModelSerializer):
     class Meta:
         model = Job
         fields = [
-            'id', 'job_title', 'company', 'company_url', 'company_size', 'market',
+            'id', 'job_title', 'company', 'company_url', 'company_size', 'job_field', 'market',
             'source_job_portal', 'source_job_portal_name', 'job_link', 'posted_date',
             'location', 'job_description', 'job_type', 'salary_range',
-            'decision_makers', 'is_exported_to_sheets', 'sheets_row_number',
+            'decision_makers',
             'scraped_at', 'updated_at'
         ]
         read_only_fields = ['scraped_at', 'updated_at']
@@ -39,8 +39,8 @@ class JobListSerializer(serializers.ModelSerializer):
         model = Job
         fields = [
             'id', 'job_title', 'company', 'market', 'location',
-            'source_job_portal_name', 'posted_date', 'job_type',
-            'decision_makers_count', 'is_exported_to_sheets', 'scraped_at'
+            'source_job_portal_name', 'posted_date', 'job_type', 'job_field',
+            'decision_makers_count', 'scraped_at'
         ]
     
     def get_decision_makers_count(self, obj):

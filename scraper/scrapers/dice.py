@@ -1,10 +1,11 @@
 """Dice Scraper"""
-from typing import List, Dict, Optional
-from ..utils.base_scraper import BaseScraper
 import json
+import logging
 import re
 import urllib.parse
-import logging
+from typing import List, Dict, Optional
+
+from ..utils.base_scraper import BaseScraper
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,17 @@ class DiceScraper(BaseScraper):
                     job_title = self.clean_text(title_elem.get_text())
                     
                     # ✅ STRICT KEYWORD MATCHING
-                    if not self.matches_keyword(job_title, keyword):
+                    # ✅ DYNAMIC KEYWORD FILTER: Check ALL keywords, not just current one
+                    keyword_match = False
+                    if self.keywords:
+                        keyword_match = any(
+                            self.matches_keyword(job_title, kw) 
+                            for kw in self.keywords
+                        )
+                    else:
+                        keyword_match = True  # No keywords = accept all
+                    
+                    if not keyword_match:
                         continue
                     
                     company = self.clean_text(card.find('a', class_='companyName').get_text() if card.find('a', class_='companyName') else '')
@@ -97,6 +108,7 @@ class DiceScraper(BaseScraper):
                         'company': company,
                         'company_url': company_url,
                         'company_size': detail.get('company_size', 'UNKNOWN'),
+                        'company_profile_url': company_profile_url,  # Pass for ScraperManager enrichment
                         'market': detail.get('market', 'USA'),
                         'job_link': job_link,
                         'posted_date': posted_date,
@@ -282,14 +294,12 @@ class DiceScraper(BaseScraper):
             else:
                 count = int(count)
             
-            if count >= 100000:
+            if count >= 10001:
                 return 'ENTERPRISE'
-            elif count >= 10000:
+            elif count >= 1001:
                 return 'LARGE'
-            elif count >= 1000:
+            elif count >= 51:
                 return 'MEDIUM'
-            elif count >= 50:
-                return 'SMALL'
             else:
                 return 'SMALL'
         except:
@@ -308,13 +318,11 @@ class DiceScraper(BaseScraper):
             else:
                 max_val = int(max_val)
             
-            avg = (min_val + max_val) / 2
-            
-            if avg >= 100000:
+            if max_val >= 10001:
                 return 'ENTERPRISE'
-            elif avg >= 10000:
+            elif max_val >= 1001:
                 return 'LARGE'
-            elif avg >= 1000:
+            elif max_val >= 51:
                 return 'MEDIUM'
             else:
                 return 'SMALL'
